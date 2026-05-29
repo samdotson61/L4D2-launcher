@@ -1,0 +1,137 @@
+diff --git a/src/d3d10/d3d10_interfaces.h b/src/d3d10/d3d10_interfaces.h
+index aa028ab..e49a398 100644
+--- a/src/d3d10/d3d10_interfaces.h
++++ b/src/d3d10/d3d10_interfaces.h
+@@ -2,8 +2,10 @@
+ 
+ #include "d3d10_include.h"
+ 
+-#ifdef _MSC_VER
++// L4D2-launcher patch: mingw-w64 14.0+ already declares ID3D10StateBlock's
++// UUID in its d3d10 headers, so re-declaring here errors out with redefinition.
++#if defined(_MSC_VER)
+ struct __declspec(uuid("0803425a-57f5-4dd6-9465-a87570834a08")) ID3D10StateBlock;
+-#else
++#elif !defined(__MINGW64_VERSION_MAJOR)
+ __CRT_UUID_DECL(ID3D10StateBlock, 0x0803425a,0x57f5,0x4dd6,0x94,0x65,0xa8,0x75,0x70,0x83,0x4a,0x08);
+ #endif
+diff --git a/src/d3d9/d3d9_include.h b/src/d3d9/d3d9_include.h
+index 8762265..db3acf2 100644
+--- a/src/d3d9/d3d9_include.h
++++ b/src/d3d9/d3d9_include.h
+@@ -78,16 +78,19 @@
+ #endif
+ 
+ // MinGW headers are broken. Who'dve guessed?
+-#ifndef _MSC_VER
++// L4D2-launcher patch: mingw-w64 14.0+ already defines this typedef
++// (d3d9types.h has a complete _D3DDEVINFO_RESOURCEMANAGER struct).
++// Skip the workaround typedef on newer toolchains.
++#if !defined(_MSC_VER) && !defined(__GNUC__)
+ typedef struct _D3DDEVINFO_RESOURCEMANAGER
+ {
+   char dummy;
+ } D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
++#endif
+ 
+-#ifndef __WINE__
++#if !defined(_MSC_VER) && !defined(__WINE__)
+ extern "C" WINUSERAPI WINBOOL WINAPI SetProcessDPIAware(VOID);
+ #endif
+-#endif
+ 
+ // This is the managed pool on D3D9Ex, it's just hidden!
+ #define D3DPOOL_MANAGED_EX D3DPOOL(6)
+diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
+index b68608a..5ab5aae 100644
+--- a/src/dxso/dxso_compiler.cpp
++++ b/src/dxso/dxso_compiler.cpp
+@@ -827,8 +827,14 @@ namespace dxvk {
+       DclSampler(idx, binding, samplerType, false, implicit);
+ 
+       if (samplerType != SamplerTypeTexture3D) {
+-        // We could also be depth compared!
+-        DclSampler(idx, binding, samplerType, true, implicit);
++        // L4D2-launcher patch: alias the depth-compare sampler to the color
++        // sampler at the same binding.  Vulkan allows separate descriptors
++        // for color + depth at the same binding, but MoltenVK's SPIRV-Cross
++        // emits two MSL texture declarations at the same [[texture(N)]] slot
++        // which Metal rejects.  Software shadow compare in SampleImage below
++        // still produces correct 0.0/1.0 shadow factors using the aliased
++        // single descriptor.
++        m_samplers[idx].depth[samplerType] = m_samplers[idx].color[samplerType];
+       }
+     }
+     else {
+@@ -840,7 +846,7 @@ namespace dxvk {
+         DclSampler(idx, binding, samplerType, false, implicit);
+ 
+         if (samplerType != SamplerTypeTexture3D)
+-          DclSampler(idx, binding, samplerType, true, implicit);
++          m_samplers[idx].depth[samplerType] = m_samplers[idx].color[samplerType];
+       }
+     }
+ 
+@@ -2975,15 +2981,37 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+         fetch4 = m_module.opCompositeConstruct(bvec4_t, indices.size(), indices.data());
+       }
+ 
++      // L4D2-launcher patch: when the caller wants shadow compare (depth=true)
++      // we still emit a REGULAR sample (no Dref op) because MoltenVK cannot
++      // bind a separate depth-compare sampler at the same Metal texture slot.
++      // The hw shadow compare is then emulated in SPIR-V below — extract .r
++      // from the vec4 sample, compare to the reference, select 1.0 / 0.0.
++      uint32_t emitSampleTypeId = typeId;
++      if (depth) {
++        DxsoVectorType vec4Type = { result.type.ctype, 4 };
++        emitSampleTypeId = getVectorTypeId(vec4Type);
++      }
+       result.id = this->emitSample(
+         projDivider != 0,
+-        typeId,
++        emitSampleTypeId,
+         sampler,
+         texcoordVar,
+-        reference,
++        0,                  // suppress hw shadow compare path inside emitSample
+         fetch4,
+         imageOperands);
+ 
++      if (depth) {
++        // shadow_factor = (sampled.r >= reference) ? 1.0 : 0.0
++        const uint32_t fp32 = m_module.defFloatType(32);
++        const uint32_t zeroIdx = 0;
++        uint32_t sampledR = m_module.opCompositeExtract(fp32, result.id, 1, &zeroIdx);
++        uint32_t bool_t = m_module.defBoolType();
++        uint32_t cmp = m_module.opFOrdGreaterThanEqual(bool_t, sampledR, reference);
++        result.id = m_module.opSelect(fp32, cmp,
++                                       m_module.constf32(1.0f),
++                                       m_module.constf32(0.0f));
++      }
++
+       if (switchProjResult) {
+         uint32_t bool_t = m_module.defBoolType();
+ 
+diff --git a/src/util/config/config.h b/src/util/config/config.h
+index f947272..51f209d 100644
+--- a/src/util/config/config.h
++++ b/src/util/config/config.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <cstdint>
+ #include <string>
+ #include <unordered_map>
+ 
+diff --git a/src/util/util_bit.h b/src/util/util_bit.h
+index 7682ace..3dd33a0 100644
+--- a/src/util/util_bit.h
++++ b/src/util/util_bit.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <cstdint>
++
+ #ifndef _MSC_VER
+ #if defined(__WINE__) && defined(__clang__)
+ #pragma push_macro("_WIN32")

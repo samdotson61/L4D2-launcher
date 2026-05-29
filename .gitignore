@@ -1,0 +1,41 @@
+# ─── L4D2-launcher .gitignore ────────────────────────────────────────────────
+# Source of truth that IS tracked: bridge/*.c, *.h, *.py, *.def; the two
+# *.patch files; play-l4d2.sh; sign-in.sh; build-deps.sh; README.md; sdk/.
+# Everything below is a build artifact, a multi-GB dependency, a runtime
+# prefix, or a log — all reproducible from the tracked source.
+#
+# NOTE: .gitignore does NOT support trailing comments on a pattern line —
+# the comment text becomes part of the pattern.  Keep comments on their own.
+
+# Wine prefixes (runtime state, GBs)
+prefix/
+whisky-prefix/
+
+# Bundled third-party runtimes (downloaded by play-l4d2.sh)
+whisky-wine/
+Game Porting Toolkit.app/
+
+# Built binaries (reproducible via build-deps.sh / play-l4d2.sh build-bridge)
+bridge/steam_api.dll
+bridge/steam_helper
+# vtables_generated.c is regenerated from sdk/ headers by gen_vtables.py
+bridge/vtables_generated.c
+dxvk-build/*.dll
+moltenvk-build/*.dylib
+
+# DXVK pipeline-state / shader cache (regenerated at runtime)
+dxvk-shaders/
+*.dxvk-cache
+
+# Superseded: old C++ bridge, replaced by steam_api_wine.c
+bridge/steam_api_wine.cpp
+# Superseded: full SDK dump; the live headers used by the build are in sdk/
+bridge/sdk_old/
+
+# Logs
+*.log
+
+# macOS / editor noise
+.DS_Store
+*.swp
+*~
