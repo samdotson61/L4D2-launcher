@@ -163,49 +163,6 @@ index b68608a..f4775db 100644
        if (switchProjResult) {
          uint32_t bool_t = m_module.defBoolType();
  
-diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 6d30088..58b5dda 100644
---- a/src/dxvk/dxvk_context.cpp
-+++ b/src/dxvk/dxvk_context.cpp
-@@ -478,25 +478,19 @@ namespace dxvk {
-       this->spillRenderPass(true);
-     }
- 
--    if (m_flags.test(DxvkContextFlag::GpRenderPassBound)) {
--      uint32_t colorIndex = std::max(0, m_state.om.framebufferInfo.getColorAttachmentIndex(attachmentIndex));
--
--      VkClearAttachment clearInfo;
--      clearInfo.aspectMask      = clearAspects;
--      clearInfo.colorAttachment = colorIndex;
--      clearInfo.clearValue      = clearValue;
--
--      VkClearRect clearRect;
--      clearRect.rect.offset.x       = 0;
--      clearRect.rect.offset.y       = 0;
--      clearRect.rect.extent.width   = imageView->mipLevelExtent(0).width;
--      clearRect.rect.extent.height  = imageView->mipLevelExtent(0).height;
--      clearRect.baseArrayLayer      = 0;
--      clearRect.layerCount          = imageView->info().numLayers;
--
--      m_cmd->cmdClearAttachments(1, &clearInfo, 1, &clearRect);
--    } else
--      this->deferClear(imageView, clearAspects, clearValue);
-+    // L4D2-launcher fix: Apple Silicon AGX faults the command buffer with
-+    // MTLCommandBufferErrorInternal (0x010c) on vkCmdClearAttachments issued
-+    // inside an active render pass (a mid-pass partial clear, which a tile-
-+    // based deferred GPU cannot do cheaply).  This was the dominant residual
-+    // black-frame fault (every full-screen Clear hit it).  Instead of the
-+    // mid-pass clear, spill the render pass and route the clear through the
-+    // deferred path so it becomes the next pass's loadOp = CLEAR — the
-+    // TBDR-native, fault-free way to clear on Apple GPUs.  We give up the
-+    // mid-pass-clear micro-optimization, which is irrelevant on a TBDR GPU.
-+    if (m_flags.test(DxvkContextFlag::GpRenderPassBound))
-+      this->spillRenderPass(true);
-+
-+    this->deferClear(imageView, clearAspects, clearValue);
-   }
-   
-   
 diff --git a/src/util/config/config.h b/src/util/config/config.h
 index f947272..51f209d 100644
 --- a/src/util/config/config.h

@@ -61,9 +61,16 @@ STEAM_ARGS=(-no-cef-sandbox)
 # dir).  Path: L4D2.exe → dxvk_d3d9.dll → Vulkan → MoltenVK → Metal.
 # `-novid` skips the Valve intro video.
 # Console is not auto-opened — toggle with the ~ key in-game when needed.
-# `+toggleconsole` would auto-open it (which was rendering as an overlay
-# on top of the main menu).
-DEFAULT_GAME_ARGS=(-novid -vulkan)
+#
+# +r_flashlightdepthtexture 0 : TEMPORARY.  L4D2's projected-flashlight
+#   shadow renders a depth texture then samples it the same frame; on Apple
+#   Silicon's tile GPU that render-to-depth-then-sample faults the command
+#   buffer (MoltenVK #832/#490) → the whole frame blacks out whenever a
+#   survivor is in the flashlight frustum.  Disabling the flashlight SHADOW
+#   (the flashlight itself still lights) sidesteps the fault.  This is the
+#   confirmation/stopgap; the real fix is forcing Store (non-memoryless)
+#   store-action on that depth target — tracked separately.
+DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 0)
 
 # ─── Pretty output ────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
