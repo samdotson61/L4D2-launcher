@@ -1374,7 +1374,11 @@ static int handle_one(int fd) {
         // envelope { realId:u32, hAsyncCall:u64, bFailed:u32, data:bytes }.
         // The bridge looks this id up in its CCallResult registry and
         // invokes vtable slot 1 — RegisterCallback wouldn't catch it.
-        static uint8_t buf[65536];
+        // 256 KB drain buffer.  Was 64 KB, but populated lobbies produced
+        // single drains of ~65 KB — right at the old limit — which forced the
+        // "buffer full → break" paths below to fire mid-callback.  A bigger
+        // buffer makes that effectively never happen so no callback is dropped.
+        static uint8_t buf[262144];
         uint32_t off = 4;  // reserve space for count
         uint32_t n_cb = 0;
 
@@ -1414,7 +1418,19 @@ static int handle_one(int fd) {
                     }
                     // Wire as id=0xFFFFFFFE { realId:u32, hAsyncCall:u64, bFailed:u32, data:bytes }
                     uint32_t envelopeLen = 4 + 8 + 4 + repackedLen;
-                    if (off + 8 + envelopeLen > sizeof buf) break;
+                    if (off + 8 + envelopeLen > sizeof buf) {
+                        // Buffer full.  We already pulled this callback via
+                        // GetNextCallback — we MUST FreeLastCallback before
+                        // breaking, or Steam's pipe keeps an "outstanding
+                        // callback" forever and every subsequent Steam call
+                        // trips the m_OutstandingCallbackThreadId assertion,
+                        // wedging all future callback delivery (this is what
+                        // hung matchmaking at "Searching for Games").  We lose
+                        // this one callback; the 256 KB buffer makes that path
+                        // effectively unreachable in practice.
+                        p_ManualDispatch_FreeLastCallback(g_h_steam_pipe);
+                        break;
+                    }
                     uint32_t marker = 0xFFFFFFFEu;
                     uint32_t bFailedU = bFailed ? 1 : 0;
                     memcpy(buf + off, &marker,      4); off += 4;
@@ -1437,7 +1453,13 @@ static int handle_one(int fd) {
                     repackedLen = repack_pack4_to_pack8(id, msg.m_pubParam, dlen, repacked);
                     if (repackedLen > sizeof repacked) repackedLen = sizeof repacked;
                 }
-                if (off + 8 + repackedLen > sizeof buf) break;
+                if (off + 8 + repackedLen > sizeof buf) {
+                    // Same as the call-result path above: free before breaking
+                    // so Steam's pipe doesn't keep an outstanding callback and
+                    // wedge all future delivery.
+                    p_ManualDispatch_FreeLastCallback(g_h_steam_pipe);
+                    break;
+                }
                 memcpy(buf + off, &id,           4); off += 4;
                 memcpy(buf + off, &repackedLen,  4); off += 4;
                 if (repackedLen) {
