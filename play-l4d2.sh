@@ -790,69 +790,27 @@ with open(r'''$mm''', 'r+b') as f:
 EOF
   ok "Patched matchmaking.dll +0xC070 (callback iterator → no-op)"
 
-  # dxvk_d3d9.dll: replace L4D2's bundled DXVK 1.9.1a with our patched
-  # DXVK 1.10.3 build (./dxvk-build/dxvk_d3d9.dll). Two problems with the
-  # stock DXVK on Apple Silicon, both solved by the build's source patches:
+  # dxvk_d3d9.dll: install our source-patched DXVK 1.10.3 build
+  # (./dxvk-build/dxvk_d3d9.dll) CLEAN.  All Apple-Silicon fixes live in the
+  # source (dxvk-build/shadow-sampler-workaround.patch): software depth-
+  # compare shadow sampling + the pushConstSize fix + mingw build fixes.
+  # geometryShader / shaderCullDistance need no handling here — our patched
+  # MoltenVK advertises them as unavailable, so DXVK never requests them and
+  # vkCreateDevice succeeds.
   #
-  # 1) DXVK requests geometryShader + shaderCullDistance VkPhysicalDevice
-  #    features that MoltenVK on Apple Silicon doesn't expose. Patched DXVK
-  #    skips these flags so vkCreateDevice succeeds.
-  # 2) DXVK's DXSO compiler binds the depth-comparison sampler variant to
-  #    the same descriptor slot as the regular sampler. MoltenVK's
-  #    SPIRV-Cross then emits two MSL declarations at the same [[texture]]
-  #    slot which Metal rejects. The patch in
-  #    dxvk-build/shadow-sampler-workaround.patch makes the depth variant
-  #    alias the color variant (same SPIR-V variable) and rewrites the
-  #    depth code path to sample as color — no MSL collision, no shadow
-  #    comparison (game just gets a regular sample on shadow shaders).
-  #
-  # We also keep the byte-signature patch path as a fallback for stock DXVK.
+  # IMPORTANT: do NOT byte-patch this DLL.  The old blind-signature patch
+  # (NOP `movl $1,0x18(%edx)` + `movq`→`movd`) was written for L4D2's bundled
+  # DXVK 1.9.1a.  On our source-built 1.10.3 those generic instruction
+  # patterns recur throughout the 14 MB binary, so the scan matched and
+  # corrupted unrelated code at arbitrary offsets — reintroducing per-frame
+  # MTLCommandBufferErrorInternal (0x010c) GPU faults.  We build DXVK from
+  # source now, so install it verbatim and unconditionally (idempotent).
   local dxvk="$bin/dxvk_d3d9.dll"
   local prebuilt_dxvk="$LAUNCHER_DIR/dxvk-build/dxvk_d3d9.dll"
   if [[ -f "$prebuilt_dxvk" ]]; then
     [[ -f "$dxvk.original" ]] || cp "$dxvk" "$dxvk.original"
-    # Check if installed DXVK is already our build (by size)
-    local prebuilt_size=$(stat -f %z "$prebuilt_dxvk" 2>/dev/null)
-    local installed_size=$(stat -f %z "$dxvk" 2>/dev/null || echo 0)
-    if [[ "$prebuilt_size" != "$installed_size" ]]; then
-      cp "$prebuilt_dxvk" "$dxvk"
-      ok "Installed patched DXVK 1.10.3 (shadow-sampler + feature workarounds)"
-    fi
-  fi
-  if [[ -f "$dxvk" ]]; then
-    [[ -f "$dxvk.original" ]] || cp "$dxvk" "$dxvk.original"
-    python3 - <<EOF
-import struct
-path = r'''$dxvk'''
-with open(path, 'rb') as f:
-    data = bytearray(f.read())
-
-# Heuristic: scan for both patch signatures, patch wherever they appear.
-geo_sig = b'\xc7\x42\x18\x01\x00\x00\x00'   # movl \$0x1, 0x18(%edx)
-mvq_sig = b'\x66\x0f\xd6\x82\x9c\x00\x00\x00'  # movq %xmm0, 0x9c(%edx)
-geo_done = False
-mvq_done = False
-i = 0
-while i < len(data) - 8:
-    if not geo_done and data[i:i+7] == geo_sig:
-        data[i:i+7] = b'\x90' * 7
-        print(f'  [dxvk] NOPed geometryShader=1 write at file +0x{i:X}')
-        geo_done = True
-        i += 7
-        continue
-    if not mvq_done and data[i:i+8] == mvq_sig:
-        data[i+2] = 0x7e  # movq -> movd; writes only low dword
-        print(f'  [dxvk] movq->movd at file +0x{i+2:X} (shaderCullDistance disabled)')
-        mvq_done = True
-        i += 8
-        continue
-    i += 1
-if not geo_done: print('  [dxvk] geometryShader site already patched or not present')
-if not mvq_done: print('  [dxvk] movq site already patched or not present')
-with open(path, 'wb') as f:
-    f.write(data)
-EOF
-    ok "Patched dxvk_d3d9.dll (geometryShader + shaderCullDistance disabled)"
+    cp "$prebuilt_dxvk" "$dxvk"
+    ok "Installed source-built DXVK 1.10.3 (verbatim, no byte-patch)"
   fi
 
   # dxvk.conf: configure DXVK for L4D2. d3d9.forceSamplerTypeSpecConstants
