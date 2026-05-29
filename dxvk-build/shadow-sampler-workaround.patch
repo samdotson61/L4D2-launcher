@@ -15,6 +15,40 @@ index aa028ab..e49a398 100644
 +#elif !defined(__MINGW64_VERSION_MAJOR)
  __CRT_UUID_DECL(ID3D10StateBlock, 0x0803425a,0x57f5,0x4dd6,0x94,0x65,0xa8,0x75,0x70,0x83,0x4a,0x08);
  #endif
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 734a7a0..f21afde 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -3891,8 +3891,15 @@ namespace dxvk {
+     DxvkDeviceFeatures supported = adapter->features();
+     DxvkDeviceFeatures enabled = {};
+ 
+-    // Geometry shaders are used for some meta ops
+-    enabled.core.features.geometryShader = VK_TRUE;
++    // Geometry shaders are used for some meta ops.
++    // L4D2-launcher fix: request only if the device supports it.  Stock DXVK
++    // forces VK_TRUE, but MoltenVK on Apple Silicon doesn't expose
++    // geometryShader, so the unconditional request made vkCreateDevice fail
++    // ("Failed to create D3D device").  D3D9 has no geometry-shader stage, so
++    // gating this off is safe — only DXVK's optional meta ops lose it, and
++    // L4D2 renders fine without (this is what the old byte-patch achieved,
++    // minus the binary corruption).
++    enabled.core.features.geometryShader = supported.core.features.geometryShader;
+     enabled.core.features.robustBufferAccess = VK_TRUE;
+     enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2;
+ 
+@@ -3921,7 +3928,10 @@ namespace dxvk {
+     enabled.core.features.sampleRateShading = VK_TRUE;
+     enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
+     enabled.core.features.shaderClipDistance = VK_TRUE;
+-    enabled.core.features.shaderCullDistance = VK_TRUE;
++    // L4D2-launcher fix: request only if supported (MoltenVK/Apple Silicon
++    // doesn't expose shaderCullDistance → unconditional VK_TRUE failed
++    // vkCreateDevice).  D3D9 doesn't use cull distance, so this is safe.
++    enabled.core.features.shaderCullDistance = supported.core.features.shaderCullDistance;
+ 
+     // Ensure we support real BC formats and unofficial vendor ones.
+     enabled.core.features.textureCompressionBC = VK_TRUE;
 diff --git a/src/d3d9/d3d9_include.h b/src/d3d9/d3d9_include.h
 index 8762265..db3acf2 100644
 --- a/src/d3d9/d3d9_include.h
