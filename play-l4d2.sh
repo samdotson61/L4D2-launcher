@@ -151,6 +151,20 @@ while [[ $# -gt 0 ]]; do
         "MVK_CONFIG_LOG_LEVEL=4"
         "MVK_CONFIG_DEBUG=1"
         "MVK_CONFIG_PERFORMANCE_TRACKING=1"
+        # Our patched MoltenVK gates its per-encoder GPU-fault logging behind
+        # this var (set it so command-buffer failures name the faulting Metal
+        # encoder / Source render pass).
+        "MVK_L4D2_DEBUG=1"
+        # Metal-level validation — turns the opaque "Internal Error (0x010c)"
+        # into the actual GPU fault reason (OOB read, feedback loop, bad
+        # store action, …) printed to stderr.  Latched at MTLDevice creation,
+        # so these must be in the launch env (they are).  Heavy; diagnostic
+        # runs only.
+        "MTL_DEBUG_LAYER=1"
+        "MTL_DEBUG_LAYER_ERROR_MODE=nslog"
+        "MTL_DEBUG_LAYER_WARNING_MODE=nslog"
+        "MTL_SHADER_VALIDATION=1"
+        "MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1"
       )
       ;;
     --wined3d)
@@ -829,30 +843,40 @@ EOF
   cat > "$bin/dxvk.conf" <<'DXVK_CONF'
 # DXVK config — see https://github.com/doitsujin/dxvk/blob/master/dxvk.conf
 # Tuned for L4D2 on Whisky-Wine 11 + patched DXVK 1.10.3 + patched MoltenVK 1.4.1.
+# NOTE: this file is the source of truth — play-l4d2.sh regenerates the
+# game-dir dxvk.conf from this heredoc on every --install-bridge, so edit
+# HERE, not the copy in the game's bin/.
 
 # Sampler type as SPIR-V spec constant → MoltenVK avoids the "two
 # textures at the same binding" error when one is used as shadow.
 d3d9.forceSamplerTypeSpecConstants = True
-# Immediate window creation (Source expects the swap chain to exist).
-d3d9.deferSurfaceCreation = False
 # Source shaders rely on pow(0, 0) == 0 etc.
 d3d9.strictPow = False
 
-# ── Level-load flicker mitigations ───────────────────────────────────────
-# Larger pipeline state cache: avoids visible compile stalls every time
-# the level streams in new materials (Source has ~1500-2500 shader
-# permutations across a typical campaign).
+# ── Per-frame MTLCommandBufferErrorInternal (0x010c) mitigations ───────────
+# Symptom: every vkQueueSubmit for the MAIN 3D scene faults with Internal
+# Error 0x010c; HUD/glow/overlay passes don't.  MVK_CONFIG_RESUME_LOST_DEVICE
+# recovers each frame → the world flickers black (and the callback backlog
+# starves matchmaking → "Searching for Games" hangs).
+#
+# Leading cause: Source self-samples render targets (water/refraction/
+# _rt_FullFrameFB); DXVK auto-enables generalHazards on non-NVIDIA GPUs and
+# inserts an attachment-feedback-loop barrier MoltenVK can't express on Apple
+# GPUs → only the self-sampling 3D submit faults.  Skip that barrier:
+d3d9.generalHazards = False
+# Promote near-full partial clears to full loadOp=CLEAR (AGX dislikes
+# in-renderpass vkCmdClearAttachments; helps the viewmodel depth-clear pass).
+d3d9.lenientClear = True
+# Create VkSurface on first Present — sidesteps swapchain/RT setup faults.
+d3d9.deferSurfaceCreation = True
+
+# ── Pipeline cache / latency ─────────────────────────────────────────────
 dxvk.maxChunkSize = 0
-# Use all available CPU cores for shader compilation (0 = auto).
 dxvk.numCompilerThreads = 0
-# Persist pipeline state cache → ${GAME}/left4dead2.dxvk-cache.
 dxvk.enableStateCache = True
-# Tight frame latency: at most 1 in-flight frame, so a stall presents
-# as one black frame rather than several queued frames going dark.
+# At most 1 in-flight frame so a faulting cmdbuf can't overlap/cascade.
 d3d9.maxFrameLatency = 1
-# Relax position invariance — Source occasionally trips strict mode.
 d3d9.invariantPosition = False
-# Direct buffer mapping avoids extra copies on streaming uploads.
 d3d9.allowDirectBufferMapping = True
 DXVK_CONF
   ok "Wrote dxvk.conf"
