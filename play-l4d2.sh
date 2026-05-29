@@ -830,19 +830,20 @@ d3d9.forceSamplerTypeSpecConstants = True
 # Source shaders rely on pow(0, 0) == 0 etc.
 d3d9.strictPow = False
 
-# ── Per-frame MTLCommandBufferErrorInternal (0x010c) mitigations ───────────
-# Symptom: every vkQueueSubmit for the MAIN 3D scene faults with Internal
-# Error 0x010c; HUD/glow/overlay passes don't.  MVK_CONFIG_RESUME_LOST_DEVICE
-# recovers each frame → the world flickers black (and the callback backlog
-# starves matchmaking → "Searching for Games" hangs).
-#
-# Leading cause: Source self-samples render targets (water/refraction/
-# _rt_FullFrameFB); DXVK auto-enables generalHazards on non-NVIDIA GPUs and
-# inserts an attachment-feedback-loop barrier MoltenVK can't express on Apple
-# GPUs → only the self-sampling 3D submit faults.  Skip that barrier:
-d3d9.generalHazards = False
-# Promote near-full partial clears to full loadOp=CLEAR (AGX dislikes
-# in-renderpass vkCmdClearAttachments; helps the viewmodel depth-clear pass).
+# ── Render-target hazard tracking: KEEP ENABLED ───────────────────────────
+# We previously forced d3d9.generalHazards = False to chase "world flicker",
+# but that flicker was actually the DXVK pushConstSize bug + the mid-pass
+# vkCmdClearAttachments fault, both now fixed in the DXVK source patch.
+# With generalHazards disabled, DXVK skips the barrier for render targets
+# that are read-after-write within a frame — including the flashlight
+# SHADOW-DEPTH map, written then sampled whenever a character model is in the
+# flashlight frustum.  Apple Silicon AGX faults the command buffer (0x010c)
+# on that unguarded hazard → the whole frame goes black the moment a survivor
+# is on screen.  Default (enabled on non-NVIDIA) restores the barrier so the
+# shadow-depth read is synchronized.  (DXVK's hazard handling spills/barriers
+# the render pass, which MoltenVK CAN express.)
+d3d9.generalHazards = True
+# Fast-path full clears (complements the deferred-loadOp clear fix in source).
 d3d9.lenientClear = True
 # Create VkSurface on first Present — sidesteps swapchain/RT setup faults.
 d3d9.deferSurfaceCreation = True
