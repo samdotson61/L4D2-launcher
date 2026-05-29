@@ -43,10 +43,27 @@ index 8762265..db3acf2 100644
  // This is the managed pool on D3D9Ex, it's just hidden!
  #define D3DPOOL_MANAGED_EX D3DPOOL(6)
 diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
-index b68608a..5ab5aae 100644
+index b68608a..f4775db 100644
 --- a/src/dxso/dxso_compiler.cpp
 +++ b/src/dxso/dxso_compiler.cpp
-@@ -827,8 +827,14 @@ namespace dxvk {
+@@ -253,7 +253,15 @@ namespace dxvk {
+     info.inputMask = m_inputMask;
+     info.outputMask = m_outputMask;
+     info.pushConstOffset = m_pushConstOffset;
+-    info.pushConstSize = m_pushConstOffset;
++    // L4D2-launcher fix: stock DXVK 1.10.3 sets pushConstSize from
++    // m_pushConstOffset (a copy/paste bug, corrected upstream later).  That
++    // produces a push-constant VkRange too small to cover the field the
++    // shader actually reads — e.g. the fragment alpha-test reads alphaRef at
++    // byte offset 24, but the bug yields a range that doesn't reach it.
++    // Desktop GPUs don't bounds-check push constants so they tolerate it;
++    // Apple Silicon Metal faults the command buffer with Internal Error
++    // (0x010c) on the out-of-bounds device load every frame.  Use the real size.
++    info.pushConstSize = m_pushConstSize;
+ 
+     return new DxvkShader(info, m_module.compile());
+   }
+@@ -827,8 +835,14 @@ namespace dxvk {
        DclSampler(idx, binding, samplerType, false, implicit);
  
        if (samplerType != SamplerTypeTexture3D) {
@@ -63,7 +80,7 @@ index b68608a..5ab5aae 100644
        }
      }
      else {
-@@ -840,7 +846,7 @@ namespace dxvk {
+@@ -840,7 +854,7 @@ namespace dxvk {
          DclSampler(idx, binding, samplerType, false, implicit);
  
          if (samplerType != SamplerTypeTexture3D)
@@ -72,7 +89,7 @@ index b68608a..5ab5aae 100644
        }
      }
  
-@@ -2975,15 +2981,37 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+@@ -2975,15 +2989,37 @@ void DxsoCompiler::emitControlFlowGenericLoop(
          fetch4 = m_module.opCompositeConstruct(bvec4_t, indices.size(), indices.data());
        }
  
