@@ -100,8 +100,11 @@ Usage:
   play-l4d2.sh --bridge            Full bridge pipeline: build, install, start helper
   play-l4d2.sh --hud               Enable Metal/D3DMetal performance HUD
   play-l4d2.sh --debug             Verbose Wine logging to stderr
-  play-l4d2.sh --diag-gfx          Verbose DXVK + MoltenVK shader/descriptor
-                                   logging (writes dxvk_*.log alongside game.log)
+  play-l4d2.sh --diag              LIGHT, playable diagnostics → game-stderr.log
+                                   (MoltenVK encoder-fault log + DXVK info;
+                                   no heavy Metal GPU validation)
+  play-l4d2.sh --diag-gfx          HEAVY DXVK + MoltenVK + Metal GPU validation
+                                   (names OOB faults; big stutter, diag only)
   play-l4d2.sh --wined3d           Bypass DXVK; render via Wine's native
                                    d3d9 → wined3d → MoltenVK path
                                    (set WINED3D_RENDERER=gl to use OpenGL
@@ -140,10 +143,26 @@ while [[ $# -gt 0 ]]; do
     --bridge)             ACTION=bridge ;;
     --hud)            EXTRA_ENV+=("MTL_HUD_ENABLED=1") ;;
     --debug)          EXTRA_ENV+=("WINEDEBUG=warn+all,fixme-all") ;;
+    --diag)
+      # LIGHT diagnostics — playable.  Our MoltenVK per-encoder GPU-fault log
+      # (names the faulting Metal encoder / Source pass on any 0x010c) plus
+      # DXVK info, captured to game-stderr.log.  Crucially does NOT enable
+      # MTL_SHADER_VALIDATION / MTL_DEBUG_LAYER (those are correct but ~5-10x
+      # slower and distort the very stutter/flicker we're trying to observe).
+      # Use this to tell a command-buffer FAULT from a compositing/hazard
+      # issue; escalate to --diag-gfx only when you need the OOB reason.
+      EXTRA_ENV+=(
+        "DXVK_LOG_LEVEL=info"
+        "DXVK_LOG_PATH=$LAUNCHER_DIR"
+        "MVK_L4D2_DEBUG=1"
+        "MVK_CONFIG_DEBUG=1"
+      )
+      ;;
     --diag-gfx)
       # Verbose DXVK + MoltenVK diagnostics for investigating black-world
       # / shader / descriptor binding bugs.  Logs to game.log; DXVK HUD
       # overlay shows pipeline + compiler stats top-left in-game.
+      # HEAVY (Metal GPU validation) — expect big stutter; diagnostic only.
       EXTRA_ENV+=(
         "DXVK_HUD=fps,frametimes,api,compiler,memory,version,pipelines,samplers,descriptors"
         "DXVK_LOG_LEVEL=info"
