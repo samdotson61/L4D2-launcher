@@ -114,6 +114,14 @@ build_dxvk() {
 #   - MVKPipelineLayout always reserves a push-constant buffer slot per stage
 #     (THE fix for the buffer(0) collision that dropped most fragment shaders)
 #   - always-on encoder execution-status capture for GPU-fault diagnosis
+#   - transient/lazily-allocated attachments use Private (real VRAM) storage
+#     instead of Memoryless — Memoryless lives in the tiny tile-memory pool
+#     allocated at pass EXECUTION, and L4D2's first full-scene frame overflows
+#     it: kernel "IOGPUSysMemory::withOptions failed" → cmd-buffer abort 0x010c
+#     → device lost → renders one frame then freezes.  MVK_L4D2_FORCE_PRIVATE_RT=0
+#     reverts to stock memoryless for A/B testing.
+#   - on a 0x010c with no encoder info, dump the full NSError userInfo +
+#     NSUnderlyingError (domain/code) — names allocation/OOM aborts
 build_moltenvk() {
   check_mvk_tools
   [[ -f "$MVK_PATCH" ]] || die "missing MoltenVK patch: $MVK_PATCH"

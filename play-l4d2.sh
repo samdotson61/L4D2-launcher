@@ -70,7 +70,28 @@ STEAM_ARGS=(-no-cef-sandbox)
 #   (the flashlight itself still lights) sidesteps the fault.  This is the
 #   confirmation/stopgap; the real fix is forcing Store (non-memoryless)
 #   store-action on that depth target — tracked separately.
-DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 0)
+#
+# Max-settings render args — the PROVEN-CLEAN full-HDR recipe (2026-06-01).
+#   THE FIX for the full-HDR campaign-load "Internal Error 0x010c"
+#   (IOGPUCommandQueueErrorDomain 268): initialise mat_hdr_level at 1, THEN
+#   switch to 2 (note the args set "+mat_hdr_level 1" early and "+mat_hdr_level
+#   2" last).  Setting HDR 2 cold — gpu_level 3's default, or a single
+#   +mat_hdr_level 2 — makes Source allocate its RGBA16Float HDR render targets
+#   in a layout the M4 Pro's AGX GPU faults on EVERY frame, so the campaign
+#   never finishes loading (one heavy frame → VK_ERROR_DEVICE_LOST).  Going
+#   1→2 forces Source to (re)allocate those HDR RTs along its level-change
+#   path, producing an AGX-valid config that renders clean.  Verified at native
+#   1512x982 across repeated runs: loads c1m1_hotel, Players:1, full HDR2,
+#   0 faults, 90 s+.  (Earlier MVK_L4D2_FORCE_PRIVATE_RT / memoryless-tile
+#   experiments were a red herring — the MoltenVK RT storage mode is irrelevant;
+#   the engine-side 1→2 reallocation is the actual fix.)
+#   Everything else is MAX: full textures (mat_picmip 0), expensive water,
+#   render-to-texture shadows, 16x aniso (video.txt) — all at 1512x982.
+#   mat_queue_mode 0 serialises D3D9 (also the wined3d multi-thread crash fix).
+#   mat_antialias 1 (MSAA off) was part of the verified-clean set; whether MSAA
+#   can coexist with full HDR at this res is untested.  +r_flashlightdepthtexture
+#   0: see the flashlight note above.
+DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 0 +mat_hdr_level 1 +mat_queue_mode 0 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 1 +mat_hdr_level 2)
 
 # ─── Pretty output ────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -82,6 +103,30 @@ say()  { printf '%s==>%s %s\n' "$B" "$N" "$*"; }
 ok()   { printf '%s ok%s %s\n' "$G" "$N" "$*"; }
 warn() { printf '%s !!%s %s\n' "$Y" "$N" "$*"; }
 die()  { printf '%s xx%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+# Force-kill stuck L4D2 / wine / helper processes — e.g. a hung game that
+# ignores Ctrl-C (a wine process wedged in an exception loop won't take SIGINT).
+# Clean wineserver shutdown first, then SIGKILL any survivors. Safe to run
+# anytime, including from a second terminal while a launch is stuck.
+do_kill() {
+  say "Killing stuck L4D2 / wine / helper processes…"
+  local ws; ws="$(dirname "$WINE64")/wineserver"
+  if [[ -x "$ws" ]]; then
+    ${WINE_DYLD:+DYLD_FALLBACK_LIBRARY_PATH="$WINE_DYLD"} WINEPREFIX="$PREFIX_DIR" "$ws" -k 2>/dev/null || true
+    sleep 1
+  fi
+  pkill -9 -f "left4dead2.exe"             2>/dev/null || true
+  pkill -9 -f "whisky-wine/Libraries/Wine" 2>/dev/null || true
+  pkill -9 -f "$PREFIX_DIR"                2>/dev/null || true
+  pkill -9 -f "steam_helper"               2>/dev/null || true
+  pkill -9 -f "log stream"                 2>/dev/null || true
+  sleep 1
+  if ps -axo command 2>/dev/null | grep -v grep | grep -qiE "left4dead2|whisky-wine/Libraries/Wine|steam_helper"; then
+    warn "Some processes may still be alive — run '$0 --kill' again or: ps -ax | grep -i wine"
+  else
+    ok "All L4D2/wine/helper processes cleared."
+  fi
+}
 
 usage() {
   cat <<'EOF'
@@ -138,6 +183,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --setup)              ACTION=setup ;;
     --reset)              ACTION=reset ;;
+    --kill)               ACTION=kill ;;
     --install-goldberg)   ACTION=install-goldberg ;;
     --uninstall-goldberg) ACTION=uninstall-goldberg ;;
     --install-steam)      ACTION=install-steam ;;
@@ -271,6 +317,19 @@ ensure_patched_moltenvk() {
 
   [[ -f "$backup" ]] || cp "$target" "$backup"
   cp "$patched" "$target"
+  # Re-sign in place with a UNIQUE code-signing identifier on every real
+  # (re)install. Rosetta caches its x86_64 AOT translation keyed by the dylib's
+  # cdhash (which includes the signing identifier) and binds it to the on-disk
+  # file via a "signature supplement". Replacing the file under an unchanged
+  # cdhash leaves the old AOT's supplement bound to a file that no longer exists,
+  # producing the FATAL "rosetta error: Attachment of code signature supplement
+  # failed" — which aborts the MoltenVK load and wedges wine in an ntdll
+  # exception loop before Vulkan ever initialises (looks just like a render
+  # hang). A fresh identifier => fresh cdhash => Rosetta builds a brand-new AOT
+  # with no stale supplement. This branch only runs on a genuine (re)install
+  # (the marker check above skips it otherwise), so there's no per-launch churn.
+  codesign --force --sign - -i "org.l4d2launcher.moltenvk.$(date +%s)" "$target" 2>/dev/null \
+    || warn "codesign of patched MoltenVK failed — Rosetta AOT may be stale (game may hang on load)"
   ok "Installed patched MoltenVK (original backed up to $(basename "$backup"))"
 }
 
@@ -540,14 +599,40 @@ do_launch() {
   #   - MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE: remove cap —
   #     it was only there to shrink the recovery window
   local mvk_env=(
-    # L4D2-launcher: Metal Argument Buffers are default-on in MoltenVK 1.2.11+
-    # but cause confirmed visual + perf regressions in DXVK D3D9 (MoltenVK#2530,
-    # #2146; id-Tech doom3-bfg also disables them on macOS).  Setting 0 forces
-    # the discrete-descriptor binding path which is what Source's HDR
-    # composite expects.
-    "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0"
+    # NOTE: bufferDeviceAddress (required by DXVK 2.x) was reported unsupported
+    # because MoltenVK reads the OS version via NSProcessInfo, which macOS clamps
+    # to 10.16 inside the wine process (wine64's pre-11 deployment target) — so
+    # MoltenVK thought the OS was 10.16 < 13.  Fixed INSIDE our patched MoltenVK
+    # (mvkSupportsBufferDeviceAddress forced true), NOT via SYSTEM_VERSION_COMPAT=0:
+    # that env var flips the process OS context and triggers a fatal Rosetta AOT
+    # re-translation of libMoltenVK.dylib ("code signature supplement failed").
+    # Metal Argument Buffers OFF (default 0).  DECISIVE FINDING (2026-05-31):
+    # with MAB=1 MoltenVK's argument-buffer setup DEADLOCKS inside vkCreateDevice
+    # under Rosetta — the game hangs right after "Process set as DPI aware" with
+    # the wine exception dispatcher in an infinite fault loop (unkillable via
+    # Ctrl-C).  With MAB=0 vkCreateDevice completes.  D3D9 does not need argument
+    # buffers (it fits Metal's legacy per-stage descriptor limits: ≤16 samplers,
+    # few UBOs), and DXVK 1.10.3 already ran this game fine with MAB off.
+    # Overridable via L4D2_MVK_MAB (0=off, 1=on, 2=auto).
+    "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=${L4D2_MVK_MAB:-0}"
     "MVK_ALLOW_METAL_FENCES=1"
-    "MVK_CONFIG_RESUME_LOST_DEVICE=1"
+    # RESUME default 0.  The level-load "freeze" is a GPU command-buffer fault
+    # (Internal Error 0x010c / IOGPUCommandQueueErrorDomain 268), NOT memory
+    # (vmmap shows ~2.1 GB of 32-bit space free at peak).  RESUME=1 lets MoltenVK
+    # recreate the device after each fault so the load limps through — but the
+    # fault is pervasive under heavy load (~thousands/min), so that "recovery" is
+    # itself a perf/glitch disaster, not a real fix.  Keep 0 so a genuine fault
+    # hard-stops cleanly and the real perf-preserving 0x010c fix can be validated.
+    # Override with L4D2_MVK_RESUME=1 if needed.
+    "MVK_CONFIG_RESUME_LOST_DEVICE=${L4D2_MVK_RESUME:-0}"
+    # PREFILL = 0 (DEFAULT / deferred encoding) = the PERFORMANT path (what the
+    # good pre-git build used).  NOTE: PREFILL is NOT a real fix for the level-load
+    # 0x010c GPU fault.  Immediate encoding (2/3) only RAISES the crash threshold —
+    # it survived a 1280×720 test but still faults at fullscreen (~1512×982), and
+    # 2/3 are also slower.  So we keep 0 for speed; the real fix for the heavy-scene
+    # 0x010c lives elsewhere (Apple-GPU tile memory / transient render-target
+    # storage — see MVK_L4D2_FORCE_PRIVATE_RT).  Overridable via L4D2_MVK_PREFILL.
+    "MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=${L4D2_MVK_PREFILL:-0}"
     "MVK_CONFIG_USE_MTLHEAP=1"
     "MVK_CONFIG_PREALLOCATE_DESCRIPTORS=1"
     "MVK_CONFIG_USE_COMMAND_POOLING=1"
@@ -580,15 +665,50 @@ do_launch() {
 
   # The "${arr[@]+"${arr[@]}"}" pattern survives `set -u` when the array is empty.
   if (( capture_stderr )); then
-    exec env ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
+    # ── Diagnostic run (--diag / --diag-gfx) ───────────────────────────────
+    # MoltenVK reports command-buffer faults as the opaque "Internal Error
+    # (0x010c)" with no encoder info — Metal discards the encoder attribution
+    # on a hard GPU memory fault.  The REAL reason (faulting address, engine,
+    # "Submissions Ignored" cascade) is logged by the AGX / IOGPU driver to
+    # the macOS unified log, but ONLY by those subsystems and it rolls off
+    # within hours.  Stream just those subsystems to gpu-faults.log for the
+    # life of this run so the fault can be named after the game exits.
+    #
+    # Unlike the normal path we do NOT exec here: this shell must survive the
+    # game to stop the stream and summarize.  Everything is "|| true"-guarded
+    # so a non-zero game exit (quit, crash, device-lost) still harvests logs.
+    local gpu_log="$LAUNCHER_DIR/gpu-faults.log"
+    : > "$gpu_log"
+    say "Streaming kernel GPU/Metal faults → $gpu_log (stops when the game exits)"
+    log stream --level info --style compact \
+      --predicate '(eventMessage CONTAINS[c] "fault" OR eventMessage CONTAINS[c] "0000010c" OR eventMessage CONTAINS[c] "IOGPU" OR eventMessage CONTAINS[c] "AGX" OR eventMessage CONTAINS[c] "Submissions" OR eventMessage CONTAINS[c] "GPU restart" OR eventMessage CONTAINS[c] "Hang" OR eventMessage CONTAINS[c] "Discarded" OR eventMessage CONTAINS[c] "page fault") OR senderImagePath CONTAINS[c] "AGX" OR senderImagePath CONTAINS[c] "IOGPU"' \
+      >> "$gpu_log" 2>&1 &
+    local _gpulog_pid=$!
+    say "Launching game (diagnostic; stderr → game-stderr.log)…  [Ctrl-C aborts]"
+    # Background the game + wait, so Ctrl-C reaches the trap. A hung wine child
+    # in the FOREGROUND swallows SIGINT and never returns (that's why Ctrl-C did
+    # nothing on the exception-loop hang). On interrupt, force-kill the whole
+    # wine tree via do_kill instead of leaving zombies.
+    env ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
       ${dyld_env[@]+"${dyld_env[@]}"} \
       "${mvk_env[@]}" \
       ${dxvk_env[@]+"${dxvk_env[@]}"} \
       WINEPREFIX="$PREFIX_DIR" \
       WINEESYNC=1 \
-      WINEDEBUG=-all \
+      WINEDEBUG="${L4D2_WINEDEBUG:--all}" \
       "$WINE64" "$WIN_EXE" "${DEFAULT_GAME_ARGS[@]}" ${GAME_ARGS[@]+"${GAME_ARGS[@]}"} \
-      2>>"$LAUNCHER_DIR/game-stderr.log"
+      2>>"$LAUNCHER_DIR/game-stderr.log" &
+    local _game_pid=$!
+    trap 'echo; warn "Interrupted — force-killing the wine tree…"; [[ -n "${_gpulog_pid:-}" ]] && kill "${_gpulog_pid}" 2>/dev/null; do_kill; exit 130' INT TERM
+    wait "$_game_pid" 2>/dev/null || warn "game process exited non-zero"
+    sleep 1   # let the streamer flush trailing fault lines
+    [[ -n "${_gpulog_pid:-}" ]] && kill "${_gpulog_pid}" 2>/dev/null || true
+    trap - INT TERM
+    local _nf; _nf="$(grep -c . "$gpu_log" 2>/dev/null || true)"; _nf="${_nf:-0}"
+    ok "Diagnostic logs saved:"
+    ok "  • game-stderr.log  — MoltenVK encoder faults, DXVK info, MTL validation"
+    ok "  • gpu-faults.log   — ${_nf} kernel AGX/IOGPU fault lines (the real 0x010c reason)"
+    exit 0
   fi
   exec env ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
     ${dyld_env[@]+"${dyld_env[@]}"} \
@@ -824,47 +944,34 @@ EOF
   # encodes the sampler type as a SPIR-V spec constant, which can help
   # MoltenVK's SPIR-V→MSL conversion avoid the "two textures at the same
   # binding" error when the same texture is used as both regular and shadow.
-  cat > "$bin/dxvk.conf" <<'DXVK_CONF'
-# DXVK config — see https://github.com/doitsujin/dxvk/blob/master/dxvk.conf
-# Tuned for L4D2 on Whisky-Wine 11 + patched DXVK 1.10.3 + patched MoltenVK 1.4.1.
-# NOTE: this file is the source of truth — play-l4d2.sh regenerates the
-# game-dir dxvk.conf from this heredoc on every --install-bridge, so edit
-# HERE, not the copy in the game's bin/.
-
-# Sampler type as SPIR-V spec constant → MoltenVK avoids the "two
-# textures at the same binding" error when one is used as shadow.
-d3d9.forceSamplerTypeSpecConstants = True
-# Source shaders rely on pow(0, 0) == 0 etc.
-d3d9.strictPow = False
-
-# ── Render-target hazard tracking: KEEP ENABLED ───────────────────────────
-# We previously forced d3d9.generalHazards = False to chase "world flicker",
-# but that flicker was actually the DXVK pushConstSize bug + the mid-pass
-# vkCmdClearAttachments fault, both now fixed in the DXVK source patch.
-# With generalHazards disabled, DXVK skips the barrier for render targets
-# that are read-after-write within a frame — including the flashlight
-# SHADOW-DEPTH map, written then sampled whenever a character model is in the
-# flashlight frustum.  Apple Silicon AGX faults the command buffer (0x010c)
-# on that unguarded hazard → the whole frame goes black the moment a survivor
-# is on screen.  Default (enabled on non-NVIDIA) restores the barrier so the
-# shadow-depth read is synchronized.  (DXVK's hazard handling spills/barriers
-# the render pass, which MoltenVK CAN express.)
-d3d9.generalHazards = True
-# Fast-path full clears (complements the deferred-loadOp clear fix in source).
-d3d9.lenientClear = True
-# Create VkSurface on first Present — sidesteps swapchain/RT setup faults.
-d3d9.deferSurfaceCreation = True
-
-# ── Pipeline cache / latency ─────────────────────────────────────────────
-dxvk.maxChunkSize = 0
-dxvk.numCompilerThreads = 0
-dxvk.enableStateCache = True
-# At most 1 in-flight frame so a faulting cmdbuf can't overlap/cascade.
-d3d9.maxFrameLatency = 1
-d3d9.invariantPosition = False
-d3d9.allowDirectBufferMapping = True
+  # CRITICAL: DXVK searches for dxvk.conf in the process's CURRENT WORKING
+  # DIRECTORY (the game ROOT, where left4dead2.exe runs), NOT in bin/ where the
+  # DLL lives.  We launch with `cd "$GAME_DIR"`, so the config MUST be written
+  # to the game root or DXVK silently ignores it — which it did for the entire
+  # project history (the DXVK log never printed "Found config file:" and every
+  # option ran on stock defaults, including the host-visible memory options that
+  # keep a 32-bit game under its address-space limit).  Write to the root; also
+  # drop a copy in bin/ for reference.
+  cat > "$GAME_DIR/dxvk.conf" <<'DXVK_CONF'
+# DXVK 1.10.3 config for L4D2 — MINIMAL BY DESIGN (pure DXVK defaults).
+#
+# PERFORMANCE LESSON (2026-05-31): L4D2 runs great on Apple Silicon on pure
+# defaults — that's how the good pre-git build behaved, and it's how the macOS
+# community runs Source games.  Every Apple-Silicon RENDER fix is compiled into
+# our dxvk-build/ DLL, NOT set here.  A previous pass added five non-standard
+# memory options (allowDirectBufferMapping=False, deviceLocalConstantBuffers,
+# evictManagedOnUnlock, maxAvailableMemory, maxChunkSize) to chase a "32-bit
+# memory wall" that proved to be a MISDIAGNOSIS — vmmap showed ~2.1 GB of the
+# 32-bit space FREE at the load fault; the real cause is a GPU command-buffer
+# fault (0x010c), not address-space exhaustion.  Those options tanked perf and
+# stability, so they are REMOVED.
+#
+# This file is read from the game ROOT (the process CWD), so anything set here
+# REALLY applies — unlike the 1.x-era bin/ copy that DXVK silently ignored.
+# Do NOT add options without a perf-tested reason.
 DXVK_CONF
-  ok "Wrote dxvk.conf"
+  cp -f "$GAME_DIR/dxvk.conf" "$bin/dxvk.conf" 2>/dev/null || true
+  ok "Wrote dxvk.conf to game root (DXVK CWD search) + bin/ (reference)"
 
   # Source engine looks for steam.dll and GameOverlayRenderer.dll alongside
   # left4dead2.exe — without them the engine silently degrades. Copy from the
@@ -941,6 +1048,26 @@ do_launch_wined3d() {
     trap "[[ -f '$stashed' ]] && mv '$stashed' '$dxvk'; ok 'Restored dxvk_d3d9.dll'" EXIT
   fi
 
+  # Force the synchronous material system. Source's multicore renderer
+  # (mat_queue_mode -1 → threaded on a many-core M4) fires D3D9 calls from
+  # multiple threads; wined3d crashes under that concurrency (simultaneous
+  # access violations in wined3d.dll across threads → tier0 0xc0000417 fatal).
+  # mat_queue_mode 0 serializes D3D submission — no visual change, and the M4
+  # Pro's single-thread speed still clears 60fps for a 2009 game.  Written to
+  # autoexec.cfg (exec'd at startup, survives the game rewriting config.cfg).
+  # THE authoritative source is video.txt's "setting.mat_queue_mode": the
+  # engine applies VideoConfig at material-system init, which is when
+  # mat_queue_mode LATCHES — so a -1 there (auto → threaded on many cores)
+  # silently overrides config.cfg / autoexec / launch-arg every time.  Force
+  # it to 0 in video.txt (idempotent), plus autoexec as backup.
+  local l4d2_cfg="$GAME_DIR/left4dead2/cfg"
+  if [[ -d "$l4d2_cfg" ]]; then
+    [[ -f "$l4d2_cfg/video.txt" ]] && \
+      perl -pi -e 's/("setting\.mat_queue_mode"\s+)"-?\d+"/$1"0"/' "$l4d2_cfg/video.txt"
+    printf '// L4D2-launcher: serialize D3D9 (wined3d multi-thread crash fix)\nmat_queue_mode 0\n' \
+      > "$l4d2_cfg/autoexec.cfg"
+  fi
+
   cd "$GAME_DIR"
   say "Launching L4D2 via wined3d (no DXVK, no -vulkan)…"
   local dyld_env=()
@@ -961,7 +1088,16 @@ do_launch_wined3d() {
   # has been the source of post-load crashes after ~minutes of play).
   local wined3d_renderer="${WINED3D_RENDERER:-vulkan}"
   say "wined3d renderer: $wined3d_renderer"
-  "$WINE64" reg add "HKEY_CURRENT_USER\\Software\\Wine\\Direct3D" \
+  # CRITICAL: this MUST set WINEPREFIX to the game's prefix.  Without it the
+  # reg add lands in the default ~/.wine, the game (which runs in $PREFIX_DIR)
+  # never sees renderer=vulkan, and wined3d silently falls back to the OpenGL
+  # backend — Apple's deprecated GL 4.1, which is missing extensions Source's
+  # shaders need (GL_EXT_texture_array, GL_ARB_uniform_buffer_object,
+  # GL_ARB_draw_instanced) → broken shaders + the c0000005/tier0 crash on the
+  # c1m1 intro.  The Vulkan backend (wined3d → vkd3d-shader → MoltenVK) has
+  # those features and avoids Apple GL entirely.
+  WINEPREFIX="$PREFIX_DIR" ${WINE_DYLD:+DYLD_FALLBACK_LIBRARY_PATH="$WINE_DYLD"} \
+    "$WINE64" reg add "HKEY_CURRENT_USER\\Software\\Wine\\Direct3D" \
     /v renderer /t REG_SZ /d "$wined3d_renderer" /f 2>/dev/null || true
 
   # Capture crash dumps + SEH activity so we get a real stack trace if the
@@ -975,9 +1111,9 @@ do_launch_wined3d() {
     "${mvk_env[@]}" \
     WINEPREFIX="$PREFIX_DIR" \
     WINEESYNC=1 \
-    WINEDEBUG=+seh,err+all,warn+wined3d \
-    WINEDLLOVERRIDES="d3d9=b" \
-    "$WINE64" "$WIN_EXE" -novid -console ${GAME_ARGS[@]+"${GAME_ARGS[@]}"} \
+    WINEDEBUG="${WINEDEBUG:-fixme-all,err+all}" \
+    WINEDLLOVERRIDES="d3d9=b;gameoverlayrenderer=" \
+    "$WINE64" "$WIN_EXE" -novid -condebug +mat_queue_mode 0 +cl_showfps 1 ${GAME_ARGS[@]+"${GAME_ARGS[@]}"} \
     2>>"$LAUNCHER_DIR/wined3d-stderr.log"
   # Trap restores dxvk_d3d9.dll on exit.
 }
@@ -990,6 +1126,7 @@ ensure_patched_moltenvk
 case "$ACTION" in
   setup)               ensure_prefix; ok "Setup complete — run again with no args to play." ;;
   reset)               do_reset ;;
+  kill)                do_kill ;;
   install-goldberg)    do_install_goldberg ;;
   uninstall-goldberg)  do_uninstall_goldberg ;;
   install-steam)       do_install_steam ;;

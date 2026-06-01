@@ -156,7 +156,7 @@ index c9ce14a..754a408 100644
  	id<MTLResidencySet> _residencySet = nil;
  #endif
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
-index e1f3c04..34c5515 100644
+index e1f3c04..374247d 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
 @@ -112,7 +112,19 @@ MVKMTLDeviceCapabilities::MVKMTLDeviceCapabilities(id<MTLDevice> mtlDev) {
@@ -201,7 +201,44 @@ index e1f3c04..34c5515 100644
  				break;
  			}
  			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FMA_FEATURES_KHR: {
-@@ -4854,6 +4876,82 @@ id<MTLBuffer> MVKDevice::getDummyBlitMTLBuffer() {
+@@ -3369,7 +3391,35 @@ MVK_PUBLIC_SYMBOL MTLStorageMode MVKPhysicalDevice::getMTLStorageModeFromVkMemor
+ 	if ( !mvkAreAllFlagsEnabled(vkFlags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ) {
+ #if !MVK_OS_SIMULATOR
+ 		if (_gpuCapabilities.isAppleGPU && mvkAreAllFlagsEnabled(vkFlags, VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) {
+-			return MTLStorageModeMemoryless;
++			// L4D2-launcher fix: MTLStorageModeMemoryless backs the resource in
++			// TILE memory, which is allocated at render-pass EXECUTION time and
++			// is a tiny pool entirely separate from device memory.  When a
++			// pass's combined memoryless attachment footprint exceeds the Apple
++			// GPU tile budget, the kernel fails the lazy allocation with
++			//   IOGPUResource::newResourceWithOptions: IOGPUSysMemory::withOptions failed
++			// and aborts the command buffer as "Internal Error (0000010c)" — even
++			// with 18 GB of device memory free, because tile memory is a separate
++			// pool.  L4D2's first full-scene gameplay frame trips this every time
++			// → VK_ERROR_DEVICE_LOST → the game renders one frame then freezes.
++			// Force real Private (device-memory) backing: the transient
++			// attachment is semantically identical to the app, just stored in
++			// regular VRAM, so there is no execution-time tile allocation that
++			// can fail.  Costs a little bandwidth (the attachment is written out
++			// rather than kept on-tile) — negligible for a 2009-era game with
++			// gigabytes free.  Set MVK_L4D2_FORCE_PRIVATE_RT=0 to A/B back to the
++			// stock memoryless behavior without rebuilding.
++			// DEFAULT REVERTED to stock memoryless: forcing Private made the
++			// allocation fault hit EARLIER (during load vs. first frame),
++			// proving the freeze is GPU memory/resource PRESSURE, not the
++			// memoryless tile budget — Private just adds more resident real
++			// memory and trips the limit sooner.  Keep memoryless (lighter,
++			// gets further).  Set MVK_L4D2_FORCE_PRIVATE_RT=1 to force Private.
++			static int s_force_private = -1;
++			if (s_force_private < 0) {
++				const char* ev = getenv("MVK_L4D2_FORCE_PRIVATE_RT");
++				s_force_private = (ev && ev[0] == '1') ? 1 : 0;
++			}
++			return s_force_private ? MTLStorageModePrivate : MTLStorageModeMemoryless;
+ 		}
+ #endif
+ 		return MTLStorageModePrivate;
+@@ -4854,6 +4904,82 @@ id<MTLBuffer> MVKDevice::getDummyBlitMTLBuffer() {
  	return _dummyBlitMTLBuffer;
  }
  
@@ -284,6 +321,88 @@ index e1f3c04..34c5515 100644
  MTLCompileOptions* MVKDevice::getMTLCompileOptions(uint32_t fpFastMathFlags,
  												   bool preserveInvariance) {
  	MTLCompileOptions* mtlCompOpt = [MTLCompileOptions new];
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDeviceMemory.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDeviceMemory.mm
+index 27d634f..a248952 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDeviceMemory.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDeviceMemory.mm
+@@ -189,6 +189,23 @@ void MVKDeviceMemory::removeImageMemoryBinding(MVKDeviceMemory** pMem, MVKImageM
+ 
+ // Ensures that this instance is backed by a MTLHeap object,
+ // creating the MTLHeap if needed, and returns whether it was successful.
++// L4D2-launcher diagnostic: running tally of MTL-backed VkDeviceMemory so the
++// command-buffer fault handler (MVKQueue.mm) can report how much GPU memory was
++// allocated at the moment of an IOGPUSysMemory::withOptions / 0x010c abort —
++// which distinguishes a true out-of-memory (tally near device size) from a
++// limit/internal failure (tally small).  Plain globals: a few races only skew
++// the ballpark, which is all we need.  External linkage so MVKQueue can read.
++uint64_t g_mvkL4D2AllocBytes = 0;
++uint32_t g_mvkL4D2AllocCount = 0;
++static int s_l4d2_alloc_dbg = -1;
++static bool l4d2AllocDbg() {
++	if (s_l4d2_alloc_dbg < 0) {
++		const char* ev = getenv("MVK_L4D2_DEBUG");
++		s_l4d2_alloc_dbg = (ev && ev[0] == '1') ? 1 : 0;
++	}
++	return s_l4d2_alloc_dbg != 0;
++}
++
+ bool MVKDeviceMemory::ensureMTLHeap() {
+ 
+ 	if (_mtlHeap) { return true; }
+@@ -224,7 +241,18 @@ bool MVKDeviceMemory::ensureMTLHeap() {
+ 	heapDesc.size = _allocationSize;
+ 	_mtlHeap = [getMTLDevice() newHeapWithDescriptor: heapDesc];	// retained
+ 	[heapDesc release];
+-	if (!_mtlHeap) { return false; }
++	if (!_mtlHeap) {
++		fprintf(stderr, "[mvk-l4d2-alloc] HEAP alloc FAILED: size=%.1f MB mode=%lu "
++						"(running total before fail: %.1f MB across %u allocs)\n",
++				_allocationSize/1048576.0, (unsigned long)_mtlStorageMode,
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
++		return false;
++	}
++	g_mvkL4D2AllocBytes += _allocationSize; g_mvkL4D2AllocCount++;
++	if (l4d2AllocDbg())
++		fprintf(stderr, "[mvk-l4d2-alloc] HEAP %.1f MB mode=%lu  → total=%.1f MB / %u allocs\n",
++				_allocationSize/1048576.0, (unsigned long)_mtlStorageMode,
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
+ 
+ 	propagateDebugName();
+ 
+@@ -239,7 +267,11 @@ bool MVKDeviceMemory::ensureMTLBuffer() {
+ 
+ 	NSUInteger memLen = mvkAlignByteCount(_allocationSize, getMetalFeatures().mtlBufferAlignment);
+ 
+-	if (memLen > getMetalFeatures().maxMTLBufferSize) { return false; }
++	if (memLen > getMetalFeatures().maxMTLBufferSize) {
++		fprintf(stderr, "[mvk-l4d2-alloc] BUFFER request %.1f MB EXCEEDS maxMTLBufferSize %.1f MB — rejected\n",
++				memLen/1048576.0, getMetalFeatures().maxMTLBufferSize/1048576.0);
++		return false;
++	}
+ 
+ 	id<MTLBuffer> buf;
+ 	// If host memory was already allocated, it is copied into the new MTLBuffer, and then released.
+@@ -261,7 +293,19 @@ bool MVKDeviceMemory::ensureMTLBuffer() {
+ 	} else {
+ 		buf = [getMTLDevice() newBufferWithLength: memLen options: getMTLResourceOptions()];     // retained
+ 	}
+-	if (!buf) { return false; }
++	if (!buf) {
++		fprintf(stderr, "[mvk-l4d2-alloc] BUFFER alloc FAILED: size=%.1f MB heap=%p "
++						"(running total before fail: %.1f MB across %u allocs)\n",
++				memLen/1048576.0, _mtlHeap,
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
++		return false;
++	}
++	g_mvkL4D2AllocBytes += memLen; g_mvkL4D2AllocCount++;
++	if (l4d2AllocDbg())
++		fprintf(stderr, "[mvk-l4d2-alloc] BUFFER %.1f MB mode=%lu%s  → total=%.1f MB / %u allocs\n",
++				memLen/1048576.0, (unsigned long)_mtlStorageMode,
++				_mtlHeap ? " (in-heap)" : "",
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
+ 	_device->makeResident(buf);
+ 	_device->getLiveResources().add(buf);
+ 	_pMemory = isMemoryHostAccessible() ? buf.contents : nullptr;
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
 index 7357ff1..c64ed05 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
@@ -311,7 +430,7 @@ index 7357ff1..c64ed05 100644
  
  	for (size_t i = 0; i < layouts.size(); i++) {
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
-index 42e5646..ae018ef 100644
+index 42e5646..54e03dc 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
 @@ -169,7 +169,16 @@ id<MTLCommandBuffer> MVKQueue::getMTLCommandBuffer(MVKCommandUse cmdUse, bool re
@@ -332,7 +451,7 @@ index 42e5646..ae018ef 100644
  		mtlCmdBuffDesc.errorOptions |= MTLCommandBufferErrorOptionEncoderExecutionStatus;
  	}
  	mtlCmdBuff = [_mtlQueue commandBufferWithDescriptor: mtlCmdBuffDesc];
-@@ -257,26 +266,52 @@ void MVKQueue::handleMTLCommandBufferError(id<MTLCommandBuffer> mtlCmdBuff) {
+@@ -257,26 +266,83 @@ void MVKQueue::handleMTLCommandBufferError(id<MTLCommandBuffer> mtlCmdBuff) {
  				 (mtlCmdBuff.label ? mtlCmdBuff.label.UTF8String : ""),
  				 mtlCmdBuff.error.code, mtlCmdBuff.error.localizedDescription.UTF8String);
  
@@ -374,13 +493,44 @@ index 42e5646..ae018ef 100644
  		}
 +		s_logged_encoder_info++;
 +	} else if (s_logged_encoder_info < 3) {
-+		// First few failures: tell us the userInfo dict was nil so we know
-+		// to enable errorOptions or it's not a per-encoder issue.
-+		fprintf(stderr, "[mvk-l4d2-patch] cmdbuf %p error has no encoder info userInfo "
-+						"(code %ld: %s, %lu userInfo keys)\n",
-+				mtlCmdBuff, (long)mtlCmdBuff.error.code,
-+				mtlCmdBuff.error.localizedDescription.UTF8String,
-+				(unsigned long)mtlCmdBuff.error.userInfo.count);
++		// No per-encoder info (Metal discards it on a hard GPU memory fault).
++		// Dump the FULL userInfo dictionary instead — for an allocation/OOM
++		// abort (IOGPUSysMemory::withOptions failed) the real signal is in
++		// NSUnderlyingError, whose domain+code identify the failure class
++		// (e.g. an IOAccelerator/IOGPU error vs. a true OOM).  This is what
++		// finally names a 0x010c that has no encoder attribution.
++		NSError* err = mtlCmdBuff.error;
++		fprintf(stderr, "[mvk-l4d2-patch] cmdbuf %p error has no encoder info "
++						"(domain %s, code %ld: %s, %lu userInfo keys):\n",
++				mtlCmdBuff, err.domain.UTF8String, (long)err.code,
++				err.localizedDescription.UTF8String,
++				(unsigned long)err.userInfo.count);
++		for (NSString* key in err.userInfo) {
++			id val = err.userInfo[key];
++			fprintf(stderr, "[mvk-l4d2-patch]    userInfo[%s] = %s\n",
++					key.UTF8String,
++					[[val description] UTF8String]);
++			// Recurse one level into the underlying error — that's where the
++			// IOAccelerator/IOGPU sub-code lives.
++			if ([val isKindOfClass:[NSError class]]) {
++				NSError* ue = (NSError*)val;
++				fprintf(stderr, "[mvk-l4d2-patch]      underlying: domain %s code %ld (%s)\n",
++						ue.domain.UTF8String, (long)ue.code,
++						ue.localizedDescription.UTF8String);
++				for (NSString* uk in ue.userInfo) {
++					fprintf(stderr, "[mvk-l4d2-patch]        underlying.userInfo[%s] = %s\n",
++							uk.UTF8String, [[ue.userInfo[uk] description] UTF8String]);
++				}
++			}
++		}
++		// L4D2-launcher diagnostic: how much GPU memory was allocated when the
++		// fault hit?  Near device size → true OOM; small → a limit/internal
++		// failure (resource count, address space, residency).  Tally lives in
++		// MVKDeviceMemory.mm.
++		extern uint64_t g_mvkL4D2AllocBytes;
++		extern uint32_t g_mvkL4D2AllocCount;
++		fprintf(stderr, "[mvk-l4d2-patch]    GPU mem allocated at fault: %.1f MB across %u VkDeviceMemory allocs\n",
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
 +		s_logged_encoder_info++;
  	}
  
@@ -395,7 +545,7 @@ index 42e5646..ae018ef 100644
  	}
  }
  
-@@ -465,6 +500,16 @@ VkResult MVKQueueCommandBufferSubmission::execute() {
+@@ -465,6 +531,16 @@ VkResult MVKQueueCommandBufferSubmission::execute() {
  
  	_queue->_submissionCaptureScope->beginScope();
  
@@ -412,3 +562,27 @@ index 42e5646..ae018ef 100644
  	// If using encoded semaphore waiting, do so now.
  	for (auto& ws : _waitSemaphores) { ws.encodeWait(getActiveMTLCommandBuffer()); }
  
+diff --git a/MoltenVK/MoltenVK/Utility/MVKFoundation.cpp b/MoltenVK/MoltenVK/Utility/MVKFoundation.cpp
+index 6d718ba..c2ba548 100644
+--- a/MoltenVK/MoltenVK/Utility/MVKFoundation.cpp
++++ b/MoltenVK/MoltenVK/Utility/MVKFoundation.cpp
+@@ -135,7 +135,18 @@ const char* mvkVkComponentSwizzleName(VkComponentSwizzle swizzle) {
+ 	}
+ }
+ 
+-bool mvkSupportsBufferDeviceAddress() { return mvkOSVersionIsAtLeast(13.0, 16.0, 1.0); }
++bool mvkSupportsBufferDeviceAddress() {
++	// L4D2-launcher fix: this gates bufferDeviceAddress on macOS>=13, but the
++	// version comes from NSProcessInfo, which macOS CLAMPS to 10.16 inside the
++	// wine process (wine64 has a pre-11 deployment target). So on macOS 26 it
++	// wrongly returns false, disabling the Vulkan-1.2 feature DXVK 2.x requires
++	// -> "Failed to create D3D device". Apple Silicon on macOS 26 fully supports
++	// bufferDeviceAddress (Metal 3 GPU addresses), so force it on. Done here, not
++	// via SYSTEM_VERSION_COMPAT=0, because that env var flips the process OS
++	// context and triggers a Rosetta AOT re-translation of this dylib that fails
++	// code-signature attachment.
++	return true;
++}
+ 
+ 
+ #pragma mark -

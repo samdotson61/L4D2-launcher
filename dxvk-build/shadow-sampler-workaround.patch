@@ -16,10 +16,10 @@ index aa028ab..e49a398 100644
  __CRT_UUID_DECL(ID3D10StateBlock, 0x0803425a,0x57f5,0x4dd6,0x94,0x65,0xa8,0x75,0x70,0x83,0x4a,0x08);
  #endif
 diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
-index 734a7a0..f21afde 100644
+index 734a7a0..8cc2bbf 100644
 --- a/src/d3d9/d3d9_device.cpp
 +++ b/src/d3d9/d3d9_device.cpp
-@@ -3891,8 +3891,15 @@ namespace dxvk {
+@@ -3891,10 +3891,28 @@ namespace dxvk {
      DxvkDeviceFeatures supported = adapter->features();
      DxvkDeviceFeatures enabled = {};
  
@@ -36,8 +36,21 @@ index 734a7a0..f21afde 100644
 +    enabled.core.features.geometryShader = supported.core.features.geometryShader;
      enabled.core.features.robustBufferAccess = VK_TRUE;
      enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2;
++    // L4D2-launcher fix: ALSO request robustImageAccess2 when the driver
++    // advertises it.  Our patched MoltenVK exposes it on Apple Silicon
++    // (isAppleGPU) so Metal bounds-checks image/texel loads, but stock DXVK
++    // 1.10.3 never enables it — leaving out-of-bounds image access the only
++    // unguarded memory path (buffers are already covered by robustBufferAccess
++    // above).  An unguarded OOB texelFetch / image load is exactly what faults
++    // the Metal command buffer with Internal Error (0x010c) and no encoder
++    // info, every frame a given shader runs.  Enabling this makes those loads
++    // return zeros instead of faulting — same protection robustBufferAccess
++    // gives buffers.
++    enabled.extRobustness2.robustImageAccess2 = supported.extRobustness2.robustImageAccess2;
  
-@@ -3921,7 +3928,10 @@ namespace dxvk {
+     enabled.extMemoryPriority.memoryPriority = supported.extMemoryPriority.memoryPriority;
+ 
+@@ -3921,7 +3939,10 @@ namespace dxvk {
      enabled.core.features.sampleRateShading = VK_TRUE;
      enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
      enabled.core.features.shaderClipDistance = VK_TRUE;
