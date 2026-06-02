@@ -91,7 +91,7 @@ STEAM_ARGS=(-no-cef-sandbox)
 #   mat_antialias 1 (MSAA off) was part of the verified-clean set; whether MSAA
 #   can coexist with full HDR at this res is untested.  +r_flashlightdepthtexture
 #   0: see the flashlight note above.
-DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 0 +mat_hdr_level 1 +mat_queue_mode 0 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 1 +mat_hdr_level 2)
+DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 0 +mat_hdr_level 1 +mat_queue_mode -1 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4 +mat_hdr_level 2)
 
 # ─── Pretty output ────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then

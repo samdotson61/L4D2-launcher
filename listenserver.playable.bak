@@ -1,0 +1,12 @@
+// === L4D2-launcher: FAST + STABLE full-HDR build (auto-exposure off / fixed exposure) ===
+// Auto-exposure (mat_dynamic_tonemapping) is the one HDR feature that crashes M4 AGX. It's
+// cheat-gated, so single-player/local needs sv_cheats; an engine cheat-flag patch (in progress)
+// will make it work online without this. Everything else in HDR stays ON.
+sv_cheats 1
+mat_dynamic_tonemapping 0
+mat_disable_bloom 0
+mat_local_contrast_enable 1
+mat_motion_blur_enabled 1
+r_waterforceexpensive 1
+r_WaterDrawReflection 1
+r_WaterDrawRefraction 1
