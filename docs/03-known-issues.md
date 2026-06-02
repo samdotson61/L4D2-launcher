@@ -2,6 +2,9 @@
 
 Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g. `#66`) reference the project task tracker.
 
+> The forward plan that closes issues #1, #6, #9, #10 (HDR/DX9 shading + online multiplayer +
+> portability, all at max settings) is **[08-roadmap.md](08-roadmap.md)**.
+
 ---
 
 ## 1. HDR / tonemapping disabled ❌ (TOP PRIORITY — `#66`)
@@ -94,7 +97,40 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
 
 **Symptom.** HDR-forcing config (`dxsupport.cfg`, `dxsupport_override.cfg`, `video.txt`) lives in the Steam game folder. A Steam "verify integrity of game files" or a game update regenerates `bin/dxsupport.cfg` and silently reverts the edit, which would re-break HDR (once it's working).
 
-**Fix (TODO).** Have `play-l4d2.sh` re-assert these edits on every launch (it already re-applies the bridge DLL + binary patches; the dxsupport/video.txt edits should join that list).
+**Fix (partial — C2 done).** `play-l4d2.sh`'s `assert_max_settings` now re-asserts the **`video.txt`** block (incl. `dxlevel 95`) on every launch, joining the bridge-DLL/binary-patch re-apply step, and snapshots the original to `video.txt.orig-pre-launcher`. Still **TODO ([A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8))**: re-assert the **`dxsupport.cfg` / `dxsupport_override.cfg`** edits the same way, since a Steam verify regenerates those.
+
+---
+
+## 9. Multicore silently forced off by the `--wined3d` path ✅ RESOLVED (Phase 1 / C1+C2)
+
+**Symptom (historical).** Multicore rendering (`mat_queue_mode -1`) could silently revert to single-core (`0`) — a **violation of the hard "max settings always, including multicore" constraint** — without any setting being changed by hand.
+
+**Cause (historical).** `play-l4d2.sh`'s `--wined3d` launch path did two **persistent** things: it `perl -pi` rewrote `video.txt`'s `setting.mat_queue_mode` to `0`, **and** it wrote a `left4dead2/cfg/autoexec.cfg` containing `mat_queue_mode 0`. `autoexec.cfg` is exec'd by the engine on **every** launch (including the normal DXVK path), so once `--wined3d` had run, multicore stayed off everywhere until something put it back. (The serialisation rationale is real — wined3d crashes under Source's multi-threaded D3D9 submission — but the *persistence* leaked into the DXVK path.)
+
+**Fix (done — [C1](08-roadmap.md#c1-neutralise-the-multicore-landmine-must-fix) + [C2](08-roadmap.md#c2-single-source-of-truth-for-settings), 2026-06-02).** Serialisation is now scoped to the `--wined3d` run only:
+> - That path flips `video.txt`'s `mat_queue_mode` to `0` for the run and reverts it to `-1` on exit (`_wined3d_restore`, an `EXIT` trap), and **no longer writes `autoexec.cfg`** at all (the `+mat_queue_mode 0` launch arg covers that single run).
+> - Every DXVK launch runs `assert_max_settings`, which re-asserts `mat_queue_mode -1` (plus the rest of the max block) in `video.txt` and **strips any stale landmine `autoexec.cfg`** — so even a hard-killed `--wined3d` run self-heals on the next launch.
+
+**Also fixed (C2).** The launcher comment block at `play-l4d2.sh` ~74–93 was **stale/contradictory** — it claimed "MSAA off / queue 0 was the verified-clean set" and pushed the debunked `mat_hdr_level 1→2` HDR theory while `DEFAULT_GAME_ARGS` actually sets MSAA 4 + queue −1. The comments now describe the real args (`mat_hdr_level` is a documented no-op in this retail build; HDR is decided by hardware caps, not these args).
+
+---
+
+## 10. Portability blockers (per-machine hardcoding) 🟡 (`#69`, `#70` — porting goal)
+
+**Goal.** Port this wrapper to **any Apple Silicon Mac** and play L4D2 + join official Steam multiplayer by plugging in the real Steam values from that Mac's Steam app. See [Phase 3](08-roadmap.md#phase-3--portability-to-any-apple-silicon-mac).
+
+**Blockers found:**
+- **Hardcoded Steam dylib path.** `bridge/steam_helper.c:33` →
+  `DYLIB_PATH "/Users/samdotson/Library/.../Left 4 Dead 2/bin/libsteam_api.dylib"`. Must resolve
+  from `$L4D2_STEAM_DYLIB` / `$L4D2_GAME_DIR` / a search of common Steam locations, then rebuild
+  the helper. ([D1](08-roadmap.md#d1-de-hardcode-the-steam-dylib-path-must-fix))
+- **Hardcoded resolution.** `video.txt` pins `defaultres 1512×982` (this 14" MacBook). Detect the
+  target Mac's resolution at launch. ([D2](08-roadmap.md#d2-dynamic-resolution))
+
+**Already portable (good):** the bridge pulls **real SteamID / persona / auth live from the running
+Mac Steam client** — no hardcoded SteamID. `vendorid 0x106b` + MoltenVK `isAppleGPU` (Apple1–10)
+cover M1–M4+. The only host requirements are Steam installed + logged in + owning L4D2 (appid 550).
+([D3](08-roadmap.md#d3-plug-in-real-steam-values))
 
 ---
 

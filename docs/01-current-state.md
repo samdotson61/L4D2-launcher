@@ -28,7 +28,7 @@ The **one major visual problem**: **HDR is disabled at the engine level**, so th
 | **HDR / tonemapping** | ❌ Off | Engine logs `HDR Disabled`; flat/overexposed lighting. dxlevel-forcing via config did **not** fix it. Leading suspect: DXVK FP16 HDR render-target reporting. |
 | **Flashlight shadow** | 🟡 Stopgap | Disabled via `+r_flashlightdepthtexture 0` (the depth-sample-same-frame path faults on the Apple tile GPU). The flashlight itself (light cone) works; it just casts no shadow. |
 | **0x010c heavy-frame crash** | 🟡 Marginal | Not triggering at current settings, but it has historically appeared under heavier GPU load (~36 s into a map). Treated as a load-threshold risk, not fully eliminated. |
-| **Online / matchmaking** | 🟡 Partial | Bridge implements lobby (`ISteamMatchmaking`), server list (`ISteamMatchmakingServers`), P2P (`ISteamNetworking`), and auth-ticket proxies. Real menu→online→join flow is not verified end-to-end in this state. |
+| **Online / multiplayer** | ❌ Not working | Bridge implements lobby (`ISteamMatchmaking`), server list (`ISteamMatchmakingServers`), P2P (`ISteamNetworking`), and auth-ticket proxies — **but the engine is never put into Steam "online mode"**: firing `SteamServersConnected_t` (id 101) is blacklisted because it currently hangs on follow-on state. Online MP needs that mode. See [Phase 2](08-roadmap.md#phase-2--online-multiplayer-join-official-steam-games). |
 | **Real menu→campaign path** | 🟡 Mostly | Verified via `+map`. The clicked menu→campaign path has historically been the area where callback-driven stalls appeared (see #63). |
 | **Shadow quality** | 🟡 Tradeoff | DXVK shadow-sampler patch aliases depth-compare to color sampling (software compare), a quality regression accepted to make shaders compile on MoltenVK. |
 
@@ -50,14 +50,29 @@ The **one major visual problem**: **HDR is disabled at the engine level**, so th
 ```
 ⚠️ **`+mat_hdr_level` is logged as `Unknown command` in this retail L4D2 build — those two tokens are no-ops.** They are kept because the playable commit (38dc236) carried them and they're harmless, but they do **not** control HDR. HDR is decided by the engine from hardware caps (see issues doc).
 
-### `video.txt` (`left4dead2/cfg/video.txt`)
+### `video.txt` (`left4dead2/cfg/video.txt`) — **live contents (2026-06-02)**
 ```
-dxlevel 95 / maxdxlevel 95 / mindxlevel 90   ← intended to force DX9.5 (HDR); engine still reports HDR off
 gpu_level 3, cpu_level 2, gpu_mem_level 2, mem_level 2
 mat_antialias 4 (4× MSAA), mat_aaquality 0, mat_forceaniso 16
 mat_queue_mode -1 (multicore), mat_picmip 0
-defaultres 1512 × 982, windowed, no border, vsync on, triple-buffered
+mat_vsync 1, mat_triplebuffered 1, mat_monitorgamma 2.2
+defaultres 1512 × 982, windowed (fullscreen 0), no border (nowindowborder 1)
 ```
+> ✅ **`setting.dxlevel 95` is now asserted on every launch** by `assert_max_settings`
+> ([C2](08-roadmap.md#c2-single-source-of-truth-for-settings)) — it isn't in the static listing above
+> because the launcher adds it (and re-asserts the rest of the block) at launch time, snapshotting the
+> original to `video.txt.orig-pre-launcher` first. dxlevel-forcing alone does **not** enable HDR; making
+> the `dxsupport.cfg` edits equally durable is the rest of
+> [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).
+>
+> ⚠️ **`defaultres 1512×982` is hardcoded to this 14" MacBook** (3024×1964 backing). Portability
+> ([plan D2](08-roadmap.md#d2-dynamic-resolution)) detects the target Mac's
+> resolution instead.
+>
+> ✅ **Multicore landmine fixed** ([C1](08-roadmap.md#c1-neutralise-the-multicore-landmine-must-fix) /
+> issue #9): `mat_queue_mode -1` is correct here and is re-asserted every launch. The `--wined3d` path no
+> longer persists `mat_queue_mode 0` — it scopes serialisation to that one run (reverted on exit by
+> `_wined3d_restore`) and writes no `autoexec.cfg`, and the DXVK launch strips any stale one.
 
 ### dxsupport (GPU→settings database) — **edited this session**
 - `bin/dxsupport.cfg` block `"0"` (the unmatched-GPU default): `maxdxlevel 90→98`, `dxlevel 90→95`. Backup at `bin/dxsupport.cfg.orig-pre-dx95`.
@@ -77,10 +92,19 @@ MVK_CONFIG_FAST_MATH_ENABLED=0            (fast-math NaN/Inf in tonemap faults A
 
 ## Repository state (git)
 
-- **Branch:** `main`, **HEAD:** `38dc236` ("launcher: full HDR … loads into campaigns").
-- **Uncommitted:** `play-l4d2.sh` is modified — `DEFAULT_GAME_ARGS` set to **4× MSAA + multicore** (max settings) on top of 38dc236.
-- **Stash:** `stash@{0}` holds additional in-progress launcher edits from this session (clean-quit extended to the normal launch path, an `L4D2_FORCE_HDR` video.txt toggle, `L4D2_MVK_MTLHEAP` override, updated PREFILL comments).
-- **Untracked:** the DXVK/MoltenVK build backups + stashes, `diag-monitor.sh`, `build-deps-guarded.sh`, `build140-clean.sh`, `listenserver.playable.bak`.
-- **Not in git:** the patched `libMoltenVK.dylib` and `dxvk_d3d9.dll` binaries (built from source via `build-deps.sh` + the tracked `.patch` files).
+- **Branch:** `main`, **HEAD:** `8cdc8ca` (*"working dx8 no tonemapping no multiplayer"*) — the
+  current known-good baseline, on top of `38dc236` ("launcher: full HDR … loads into campaigns").
+  Working tree is **clean**; the `docs/` folder and the DXVK/MoltenVK build backups were committed
+  in `8cdc8ca`.
+- **`DEFAULT_GAME_ARGS`** carries **4× MSAA + multicore** (`mat_queue_mode -1`) + max textures.
+- **Stash:** `stash@{0}` (WIP on `38dc236`) holds in-progress launcher edits (clean-quit extended
+  to the normal launch path, an `L4D2_FORCE_HDR` video.txt toggle, `L4D2_MVK_MTLHEAP` override,
+  updated PREFILL comments).
+- **Not in git:** the patched `libMoltenVK.dylib` and `dxvk_d3d9.dll` binaries (rebuildable from
+  source via `build-deps.sh` + the tracked `.patch` files); the game-folder config edits.
 
-> ⚠️ The `dxsupport.cfg` / `dxsupport_override.cfg` / `video.txt` edits live in the **Steam game folder**, not this repo. A Steam "verify integrity of game files" or game update will regenerate `bin/dxsupport.cfg` and silently revert the HDR-forcing edit. The launcher does **not** yet re-assert these on launch (a worthwhile hardening TODO).
+> **Baseline caveat:** the `8cdc8ca` label is literal — this baseline is **DX8-effective, HDR
+> off, no multiplayer**. The forward plan to fix all three at max settings is
+> [08-roadmap.md](08-roadmap.md).
+
+> ⚠️ The `dxsupport.cfg` / `dxsupport_override.cfg` / `video.txt` edits live in the **Steam game folder**, not this repo. A Steam "verify integrity of game files" or game update will regenerate `bin/dxsupport.cfg` and silently revert the HDR-forcing edit. The launcher now re-asserts **`video.txt`** (incl. `mat_queue_mode -1` + `dxlevel 95`) on every launch via `assert_max_settings` ([C2](08-roadmap.md#c2-single-source-of-truth-for-settings)); making the **`dxsupport*.cfg`** edits equally durable is the rest of [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).

@@ -10,6 +10,14 @@ A dual-process Steam-API proxy. The Windows game talks to our shim; the shim tal
 
 ### `steam_helper.c` → `steam_helper` (native arm64)
 Loads the real `libsteam_api.dylib` and serves a binary RPC protocol on **TCP 127.0.0.1:54550**.
+Real Steam identity/auth (SteamID, persona, auth tickets) is read **live from the running macOS
+Steam client** — nothing about the account is hardcoded, which is what makes "plug in the real
+Steam values from this Mac's Steam app" work on any machine.
+
+> ⚠️ **Portability blocker:** the dylib *path* **is** hardcoded — `steam_helper.c:33`
+> `DYLIB_PATH "/Users/samdotson/Library/.../Left 4 Dead 2/bin/libsteam_api.dylib"`. To port to
+> another Mac this must be resolved dynamically. See [issue #10](03-known-issues.md#10-portability-blockers-per-machine-hardcoding--69-70--porting-goal)
+> / [plan D1](08-roadmap.md#d1-de-hardcode-the-steam-dylib-path-must-fix).
 Wire format: `[u32 op][u32 arg_len][args] → [u32 status][u32 ret_len][return]`.
 
 Opcode groups (60+ total):
@@ -98,5 +106,5 @@ Vulkan → Metal. Built from **MoltenVK v1.4.1** + `null-descriptor-fallback.pat
 
 - `dxvk.conf` (game root **and** `bin/`) — DXVK searches the CWD, so the root copy is the effective one. Minimal by design; the real Apple-Silicon fixes are compiled into the DLL.
 - `steam_appid.txt` = `550` (L4D2) for the DRM check.
-- `cfg/video.txt` — resolution + graphics settings (see [01-current-state.md](01-current-state.md#videotxt-left4dead2cfgvideotxt)).
-- `bin/dxsupport.cfg` + `left4dead2/dxsupport_override.cfg` — GPU→dxlevel database, edited to force DX9.5 for the M4 Pro (HDR investigation).
+- `cfg/video.txt` — resolution + graphics settings (see [01-current-state.md](01-current-state.md#videotxt-left4dead2cfgvideotxt)). The launcher's `assert_max_settings` idempotently re-asserts the max-settings block here on **every** launch — `gpu_level 3`, `mat_antialias 4` (4× MSAA), `mat_forceaniso 16`, `mat_queue_mode -1` (multicore), `dxlevel 95` — backing the original up once to `video.txt.orig-pre-launcher`. It also strips any stale `cfg/autoexec.cfg` a `--wined3d` run left behind (the multicore landmine).
+- `bin/dxsupport.cfg` + `left4dead2/dxsupport_override.cfg` — GPU→dxlevel database, edited to force DX9.5 for the M4 Pro (HDR investigation). `dxlevel 95` is now also asserted directly in `video.txt` by the launcher (see above); making *these two files'* edits equally durable across a Steam file-verify is [Phase 1 / A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).

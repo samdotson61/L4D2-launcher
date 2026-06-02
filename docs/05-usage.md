@@ -27,7 +27,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `--debug` | Verbose Wine logging to stderr |
 | `--diag` | **Light** diagnostics → `game-stderr.log` (per-encoder GPU-fault log + DXVK info; playable) |
 | `--diag-gfx` | **Heavy** DXVK+MoltenVK+Metal validation (names OOB faults; big stutter; diagnostic only) |
-| `--wined3d` | Bypass DXVK; use Wine's native d3d9 → wined3d → MoltenVK (set `WINED3D_RENDERER=gl` for the GL backend) |
+| `--wined3d` | Bypass DXVK; use Wine's native d3d9 → wined3d → MoltenVK (set `WINED3D_RENDERER=gl` for the GL backend). Serialises D3D9 (`mat_queue_mode 0`) for **that run only** — multicore (`-1`) is reverted on exit and no `autoexec.cfg` is persisted ([issue #9](03-known-issues.md), resolved in C1). |
 | `--help` | Usage |
 | `-- <args>` | Forward the rest to `left4dead2.exe`, e.g. `-- +map c1m1_hotel -windowed` |
 
@@ -64,7 +64,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 
 ## Game graphics settings
 
-Live in `left4dead2/cfg/video.txt` (resolution, MSAA, multicore, gpu_level) and the dxsupport files. The user's max-settings preference (4× MSAA + multicore) must be preserved — see [01-current-state.md](01-current-state.md). The launcher forces nothing *down*.
+Live in `left4dead2/cfg/video.txt` (resolution, MSAA, multicore, gpu_level) and the dxsupport files. The user's max-settings preference (**4× MSAA + multicore + max textures + DX9.5**) is a **hard, non-negotiable constraint** and must be preserved — see [01-current-state.md](01-current-state.md). The DXVK path forces nothing down, and `assert_max_settings` now idempotently re-asserts the full max-settings block in `video.txt` on **every** launch (`mat_antialias 4`, `mat_queue_mode -1`, `mat_forceaniso 16`, `gpu_level 3`, `dxlevel 95`) — [Phase 1 / C2, done](08-roadmap.md#c2-single-source-of-truth-for-settings). The `--wined3d` path serialises D3D9 for its own run only and no longer leaks `mat_queue_mode 0` into the DXVK path ([issue #9](03-known-issues.md), resolved in C1).
 
 ## Signing in to Steam
 
