@@ -25,7 +25,7 @@ Reconciled against `git HEAD` and the live game folder — supersedes any earlie
 | Multiplayer | **Not working** — bridge plumbing exists, but the engine is never put into Steam "online mode" |
 | `video.txt` dxlevel | Launcher now asserts `setting.dxlevel 95` on every launch (C2 ✅); `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
 | Multicore | `mat_queue_mode -1` (**on**), now re-asserted in `video.txt` every launch; the `--wined3d` landmine is fixed — see [C1](#c1-neutralise-the-multicore-landmine-must-fix) ✅ |
-| DXVK | **1.10.3** deployed; **2.5.3** stashed (`dxvk-build/dxvk_d3d9.dll.253-stash`) |
+| DXVK | **1.10.3** deployed (working). **2.5.3** explored 2026-06-02: stock stash → black screen; a hand-ported + rebuilt 2.5.3 cleared that (0 pipeline fails) + the #61 gating, but then **deadlocks in `vkCreateDevice`** — see [A1](#a1-swap-to-dxvk-253-and-confirm-the-hdr-format) |
 | Stack | Whisky-Wine 11 · MoltenVK 1.4.1 + patch · Rosetta 2 · macOS 26.x · M4 Pro |
 
 ---
@@ -42,18 +42,79 @@ back to LDR lightmaps. **dxlevel-forcing alone is proven insufficient** (already
 + `dxsupport.cfg` + `dxsupport_override.cfg`).
 
 ### A1. Swap to DXVK 2.5.3 and confirm the HDR format
+**❌ ATTEMPTED 2026-06-02 — the stash regresses; HDR not reached.** Swapped `dxvk_d3d9.dll.253-stash`
+(confirmed `v2.5.3+`) into the deploy path and booted `--diag +map c1m1_hotel`. Result: **black screen +
+audio stutter**, **150 graphics pipelines failed `VK_ERROR_INITIALIZATION_FAILED`**, **9398 kernel
+AGX/IOGPU fault lines**. Root cause is logged unambiguously in `game-stderr.log` — the MSL fragment shaders
+declare a color texture **and** a depth-compare texture at the *same* Metal slot (`texture2d … [[texture(0)]]`
++ `depth2d … [[texture(0)]]`, plus two `[[sampler(0)]]`), which Metal rejects. That is exactly the bug
+`shadow-sampler-workaround.patch` fixes → **confirmed: the stock 2.5.3 stash does NOT carry our patches.**
+Device creation itself was fine (`geometryShader 0`, `shaderCullDistance 0`, `robustImageAccess2 1`; MAB-off
+is the launcher default) so **#61 was not the blocker**. `A16B16G16R16F`/`HDR Enabled` could not be reached —
+nothing rendered. **Reverted to 1.10.3** (`dxvk-build/dxvk_d3d9.dll.pre-a1`, sha `f9a30c6…`).
+
+Original plan (kept for a *future rebuilt* 2.5.3):
 - Back up deployed `bin/dxvk_d3d9.dll` (1.10.3), drop in `dxvk-build/dxvk_d3d9.dll.253-stash`.
 - 2.5.3 needs **MAB-off** + geometry-shader/cull-distance feature gating to create a device on
-  MoltenVK (`#61`) — re-apply / re-verify.
+  MoltenVK (`#61`). *(Verified met — device creation is not the blocker.)*
 - The shadow-sampler + pushConstSize source patches were authored against 1.10.3 offsets — for 2.5.3
-  they must be **rebased onto 2.5.3 source and rebuilt** (don't assume the 1.10.3 byte signatures
-  match). Confirm whether the stashed 2.5.3 DLL already carries them.
+  they must be **rebased onto 2.5.3 source and rebuilt**. *(Confirmed necessary — the stash lacks them.)*
 - Boot with `DXVK_LOG_LEVEL=info`; grep `left4dead2_d3d9.log` for `A16B16G16R16F` as a
   renderable+blendable format, and `console.log` for **`HDR Enabled`**.
 
-**Fallback if 2.5.3 regresses** (reintroduces `0x010c`, breaks max settings, or trades against HDR):
-stay on 1.10.3 and write a **targeted DXVK patch** to advertise `D3DFMT_A16B16G16R16F` as a blendable
-RT in `CheckDeviceFormat` — solve the exact cap Source checks, without the whole-version jump.
+**Next move — paths forward (empirical lean: the fallback):**
+1. **Cheap conf experiment — ❌ TRIED 2026-06-02, did NOT help.** Set `d3d9.forceSamplerTypeSpecConstants = True`
+   via `DXVK_CONFIG` (confirmed read: `Found config env … = True` in the d3d9 log). Still **218 pipeline-compile
+   failures**, and `game-stderr.log` still showed 2048 `depth2d<float> … [[texture(0)]]` duplicate-slot
+   declarations. That option resolves sampler *type* (2D/cube/volume), not the color-vs-depth-compare
+   duplication — so it is no substitute for the source patch. Reverted.
+2. **Rebase + rebuild — ⚠️ THREE walls cleared, blocked on a fourth (a Rosetta-level deadlock).** Cloned
+   DXVK `v2.5.3`, hand-ported the patch to 2.5.3's structure, rebuilt the d3d9 target. In order:
+   - **Shadow-sampler port ✓** — `0` pipeline-compile failures (was 150/218). The black-screen cause is
+     fixed: aliasing depth→color + software shadow-compare ports cleanly to 2.5.3's `dxso_compiler.cpp`.
+     (`pushConstSize` not needed — 2.5.3 uses `sizeof(D3D9RenderStateInfo)`; one mingw-14 guard in
+     `d3d9_include.h` was needed to compile.)
+   - **geometryShader / shaderCullDistance gating ✓ (#61)** — without it these are requested `1` →
+     `Failed to create device`. Ported the `= supported…` gating in `d3d9_device.cpp`. *(Lesson: the stock
+     stash already had this gating, which is why it created a device — don't infer "2.5.3 needs no gating".)*
+   - **robustBufferAccess2 gating ✓** — DXVK 2.x's `dxvk_adapter.cpp` *unconditionally* requires
+     `robustBufferAccess2` ("we use the robustness alignment info in a number of places"), which Apple/MoltenVK
+     doesn't expose → `VK_ERROR_FEATURE_NOT_PRESENT` (and *racily* a hang instead of a clean error). Gated it
+     `= supported`. (MoltenVK already provides the other two Robustness2 flags: `nullDescriptor` via
+     `null-descriptor-fallback.patch`, and `robustImageAccess2`.) EXPERIMENTAL — DXVK 2.x assumes v2 robustness
+     alignment, so a real fix may need MoltenVK to advertise it rather than gating it off.
+   - **`vkCreateDevice` blocked → root cause: robustBufferAccess2.** With all three fixes in, device creation
+     flakily **hung or cleanly failed** right after `Process set as DPI aware`. One run logged it plainly:
+     `VK_ERROR_FEATURE_NOT_PRESENT … VkPhysicalDeviceRobustness2FeaturesKHR` (1st flag). DXVK 2.x's
+     `dxvk_adapter.cpp` **unconditionally requires `robustBufferAccess2`**, which Apple/Metal can't provide
+     (MoltenVK feature request #2447, unimplemented — Metal has no OOB buffer robustness). Requesting an
+     unsupported feature makes MoltenVK *racily* hang or return the error (explains the hang-vs-fail flake).
+
+   **MoltenVK route (2026-06-02): RENDERS, but does NOT fix HDR.** Per the Gcenx "fake the missing feature"
+   method, set `robustBufferAccess2 = true` in our MoltenVK patch (`MVKDevice.mm`) + rebuilt MoltenVK. DXVK
+   2.5.3 then **creates a device and renders `c1m1_hotel`** (survivors + HUD — confirmed by screenshot). But:
+   - **HDR is still OFF** — flat/overexposed, no shadows, *visually identical to 1.10.3*; no `HDR Enabled`, no
+     `A16B16G16R16F` activity.
+   - **Heavy stutter ≈ 1800 `0x010c` GPU faults** — exactly the author's documented consequence of faking
+     `robustBufferAccess2` (DXVK assumes buffer bounds-checking Metal doesn't do → per-frame OOB faults).
+     Reverted MoltenVK to the stable `robustBufferAccess2=false` build.
+
+   ### 🔑 CONCLUSION — DXVK is NOT the HDR lever (A1 hypothesis disproven)
+   Two very different DXVK versions — 1.10.3 **and** a fully-patched, rendering 2.5.3 — **both render HDR-off,
+   flat, no shadows.** So HDR/shadows is **not a DXVK-version problem**; A1's premise ("2.5.3 surfaces the FP16
+   blendable RT → HDR turns on") is **wrong**. The game is **DX8-effective** (baseline commit = *"working
+   dx8"*); HDR + proper shading need real **DX9.5**, and the engine isn't getting there regardless of DXVK or
+   of the config-level `dxlevel 95` forcing. **Next:** pivot to *why the engine stays DX8-level* — engine /
+   `dxsupport` / `mat_dxlevel` + Source's HDR/shader-model detection (deeper than [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8)). The DXVK swap is a closed branch.
+
+   Work preserved (for any future DXVK-2.x effort): `dxvk-build/shadow-sampler-workaround-2.5.3.patch`
+   (**4 real fixes**), built DLL `dxvk-build/dxvk_d3d9.dll.253-patched`, faked MoltenVK
+   `moltenvk-build/libMoltenVK.dylib.rba2true`. Stable deployed: 1.10.3 + `libMoltenVK.dylib.stable-rba2false`.
+
+**Fallback (now strongly recommended — 2.5.3 cleared two walls but hit a `vkCreateDevice` deadlock):** stay
+on the known-good 1.10.3 and write a **targeted DXVK patch** to advertise `D3DFMT_A16B16G16R16F` as a
+blendable RT in `CheckDeviceFormat` — solve the exact cap Source checks, without the whole-version jump and
+its 2.x↔MoltenVK breakage (pipeline-library gaps + the device-creation deadlock).
 
 ### A2. Re-assert DX9.5 everywhere (and make it durable — fixes issue #8)
 - `bin/dxsupport.cfg` block `"0"`: `maxdxlevel 98` / `dxlevel 95` (already applied).

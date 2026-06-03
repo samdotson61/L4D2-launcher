@@ -25,7 +25,7 @@ The **one major visual problem**: **HDR is disabled at the engine level**, so th
 
 | Area | State | Detail |
 |---|---|---|
-| **HDR / tonemapping** | ❌ Off | Engine logs `HDR Disabled`; flat/overexposed lighting. dxlevel-forcing via config did **not** fix it. Leading suspect: DXVK FP16 HDR render-target reporting. |
+| **HDR / tonemapping** | ❌ Off | Flat/overexposed lighting, no real shadows — **DX8-effective**. dxlevel-forcing via config didn't fix it, and **DXVK is now ruled out** (a patched, *rendering* 2.5.3 looks identical — see [A1](08-roadmap.md#a1-swap-to-dxvk-253-and-confirm-the-hdr-format)). Real lever: engine DX9.5 shading. |
 | **Flashlight shadow** | 🟡 Stopgap | Disabled via `+r_flashlightdepthtexture 0` (the depth-sample-same-frame path faults on the Apple tile GPU). The flashlight itself (light cone) works; it just casts no shadow. |
 | **0x010c heavy-frame crash** | 🟡 Marginal | Not triggering at current settings, but it has historically appeared under heavier GPU load (~36 s into a map). Treated as a load-threshold risk, not fully eliminated. |
 | **Online / multiplayer** | ❌ Not working | Bridge implements lobby (`ISteamMatchmaking`), server list (`ISteamMatchmakingServers`), P2P (`ISteamNetworking`), and auth-ticket proxies — **but the engine is never put into Steam "online mode"**: firing `SteamServersConnected_t` (id 101) is blacklisted because it currently hangs on follow-on state. Online MP needs that mode. See [Phase 2](08-roadmap.md#phase-2--online-multiplayer-join-official-steam-games). |
@@ -39,7 +39,7 @@ The **one major visual problem**: **HDR is disabled at the engine level**, so th
 ### Versions
 - **OS / HW:** macOS 26.x, Apple M4 Pro, Rosetta 2 (x86 emulation for the 32-bit game)
 - **Wine:** Whisky-Wine 11 (`~/L4D2-launcher/whisky-wine/`), prefix at `~/L4D2-launcher/whisky-prefix/`
-- **DXVK:** **1.10.3** (+ `shadow-sampler-workaround.patch`) — deployed `bin/dxvk_d3d9.dll` matches `dxvk-build/dxvk_d3d9.dll` (sha1 `f9a30c6…`). A **2.5.3** build exists but is **stashed** (`dxvk-build/dxvk_d3d9.dll.253-stash`), not deployed.
+- **DXVK:** **1.10.3** (+ `shadow-sampler-workaround.patch`) — deployed `bin/dxvk_d3d9.dll` matches `dxvk-build/dxvk_d3d9.dll` (sha1 `f9a30c6…`). A **2.5.3** build exists but is **stashed** (`dxvk-build/dxvk_d3d9.dll.253-stash`), not deployed. *(Explored 2026-06-02: a hand-patched + rebuilt 2.5.3 — shadow-sampler + feature gating + faked `robustBufferAccess2` in MoltenVK — **did render**, but with the **same HDR-off flat lighting** as 1.10.3 plus a `0x010c` fault storm. So **DXVK is not the HDR lever**. Reverted. Full story: [A1](08-roadmap.md#a1-swap-to-dxvk-253-and-confirm-the-hdr-format).)*
 - **MoltenVK:** **1.4.1** (+ `null-descriptor-fallback.patch`), deployed dylib sha1 `9e8abed1…`
 - **Steamworks SDK:** 1.53a (+ ISteamTimeline from 1.60)
 

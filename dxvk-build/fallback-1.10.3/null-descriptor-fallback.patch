@@ -1,0 +1,588 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
+index 00db8b0..8e5efa8 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
+@@ -880,7 +880,16 @@ template <MVKArgumentBufferMode Layout> struct MVKArgBufEncoder;
+ /** Argument buffer encoder for Metal 3 encoding */
+ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::Metal3> {
+ 	MVKGPUResource* dst;
+-	MVKArgBufEncoder(id<MTLArgumentEncoder> enc, char* base): dst(reinterpret_cast<MVKGPUResource*>(base)) {}
++	// L4D2-launcher patch: cached fallback GPU resource handles for null descriptor slots
++	uint64_t nullBufAddr;
++	MTLResourceID nullTexID;
++	MTLResourceID nullSampID;
++	MVKArgBufEncoder(id<MTLArgumentEncoder> enc, char* base,
++					  id<MTLBuffer> nullBuf, id<MTLTexture> nullTex, id<MTLSamplerState> nullSamp):
++		dst(reinterpret_cast<MVKGPUResource*>(base)),
++		nullBufAddr(nullBuf ? nullBuf.gpuAddress : 0),
++		nullTexID(nullTex ? nullTex.gpuResourceID : MTLResourceID{}),
++		nullSampID(nullSamp ? nullSamp.gpuResourceID : MTLResourceID{}) {}
+ 	void advance(size_t stride) { dst = reinterpret_cast<MVKGPUResource*>(reinterpret_cast<char*>(dst) + stride); }
+ 	void* constantData(size_t index) { return reinterpret_cast<char*>(dst) + index; }
+ 	void setTexture(id<MTLTexture> tex,       size_t index = 0) { dst[index].resource = tex.gpuResourceID; }
+@@ -888,9 +897,10 @@ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::Metal3> {
+ 	void setBuffer(id<MTLBuffer> buf, uint64_t offset, size_t index = 0) {
+ 		dst[index].gpuAddress = buf.gpuAddress + offset;
+ 	}
+-	void setNullTexture(size_t index = 0) { dst[index].resource = {}; }
+-	void setNullSampler(size_t index = 0) { dst[index].resource = {}; }
+-	void setNullBuffer (size_t index = 0) { dst[index].gpuAddress = 0; }
++	// L4D2-launcher patch: bind dummies instead of zero so GPU dereferences don't fault
++	void setNullTexture(size_t index = 0) { dst[index].resource = nullTexID; }
++	void setNullSampler(size_t index = 0) { dst[index].resource = nullSampID; }
++	void setNullBuffer (size_t index = 0) { dst[index].gpuAddress = nullBufAddr; }
+ 	void setTexture(MVKImageView* img, size_t index = 0) { setTexture(img ? img->getMTLTexture() : nil, index); }
+ 	void setSampler(MVKSampler* samp, size_t index = 0) { setSampler(samp ? samp->getMTLSamplerState() : nil, index); }
+ 	void setBuffer(const VkDescriptorBufferInfo* info, size_t index = 0) {
+@@ -905,7 +915,13 @@ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::Metal3> {
+ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::ArgEncoder> {
+ 	id<MTLArgumentEncoder> enc;
+ 	size_t base;
+-	MVKArgBufEncoder(id<MTLArgumentEncoder> enc_, char* base): enc(enc_), base(0) {}
++	// L4D2-launcher patch: fallback resources for null descriptor slots
++	id<MTLBuffer> nullBuf;
++	id<MTLTexture> nullTex;
++	id<MTLSamplerState> nullSamp;
++	MVKArgBufEncoder(id<MTLArgumentEncoder> enc_, char* base_unused,
++					  id<MTLBuffer> nullBuf_, id<MTLTexture> nullTex_, id<MTLSamplerState> nullSamp_):
++		enc(enc_), base(0), nullBuf(nullBuf_), nullTex(nullTex_), nullSamp(nullSamp_) {}
+ 	void advance(size_t stride) { base += stride; }
+ 	void* constantData(uint32_t index) { return [enc constantDataAtIndex:base + index]; }
+ 	void setTexture(id<MTLTexture> tex,       size_t index = 0) { [enc setTexture:tex atIndex:base + index]; }
+@@ -913,9 +929,10 @@ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::ArgEncoder> {
+ 	void setBuffer(id<MTLBuffer> buf, uint64_t offset, size_t index = 0) {
+ 		[enc setBuffer:buf offset:static_cast<NSUInteger>(offset) atIndex:base + index];
+ 	}
+-	void setNullTexture(size_t index = 0) { [enc setTexture:nil atIndex:base + index]; }
+-	void setNullSampler(size_t index = 0) { [enc setSamplerState:nil atIndex:base + index]; }
+-	void setNullBuffer (size_t index = 0) { [enc setBuffer:nil offset:0 atIndex:base + index]; }
++	// L4D2-launcher patch: bind dummies instead of nil
++	void setNullTexture(size_t index = 0) { [enc setTexture:nullTex atIndex:base + index]; }
++	void setNullSampler(size_t index = 0) { [enc setSamplerState:nullSamp atIndex:base + index]; }
++	void setNullBuffer (size_t index = 0) { [enc setBuffer:nullBuf offset:0 atIndex:base + index]; }
+ 	void setTexture(MVKImageView* img, size_t index = 0) {
+ 		[enc setTexture:img ? img->getMTLTexture() : nil atIndex:base + index];
+ 	}
+@@ -946,11 +963,22 @@ static void writeDescriptorSetGPUBuffer(
+ 	const MVKDescriptorBinding& binding,
+ 	id<MTLArgumentEncoder> enc_, char* base, const uint32_t* auxOffsets,
+ 	const void* src, size_t srcStride, MVKDescriptorUpdateSourceType srcType,
+-	uint32_t start, uint32_t count)
++	uint32_t start, uint32_t count,
++	MVKDevice* device)	// L4D2-launcher patch: device for null-descriptor fallback buffer
+ {
+ 	constexpr size_t dstStride = descriptorGPUStride(ArgBufMode, Layout);
+ 	size_t startOffset = start * dstStride;
+-	MVKArgBufEncoder<ArgBufMode> enc(enc_, base);
++	// L4D2-launcher patch: gather fallback resources for null descriptor slots.
++	// We tried splitting read vs write dummies based on descriptorType, but
++	// VK_DESCRIPTOR_TYPE_STORAGE_BUFFER means "shader CAN write," not "will."
++	// DXVK uses STORAGE_BUFFER for read paths too, and routing those to an
++	// uninitialized sacrificial buffer made them read garbage → GPU faults.
++	// Single shared zero-filled dummies for everything; cross-shader write
++	// pollution is the documented trade-off (rare visual artifact).
++	id<MTLBuffer>       nullBuf  = device ? device->getDummyNullDescriptorMTLBuffer()  : nil;
++	id<MTLTexture>      nullTex  = device ? device->getDummyNullDescriptorMTLTexture() : nil;
++	id<MTLSamplerState> nullSamp = device ? device->getDummyNullDescriptorMTLSampler() : nil;
++	MVKArgBufEncoder<ArgBufMode> enc(enc_, base, nullBuf, nullTex, nullSamp);
+ 	uint32_t baseOffset = ArgBufMode == MVKArgumentBufferMode::ArgEncoder ? binding.argBufID : binding.gpuOffset;
+ 
+ 	if (Layout == MVKDescriptorGPULayout::OutlinedData || Layout == MVKDescriptorGPULayout::InlineData) {
+@@ -1071,7 +1099,7 @@ static void writeDescriptorSetGPUBuffer(
+ 	const uint32_t* auxOffsets = set->auxIndices;
+ 	if (canUseFastPathUpdate(binding->gpuLayout, ArgBufMode)) {
+ 		switch (binding->gpuLayout) {
+-#define DISPATCH(x) writeDescriptorSetGPUBuffer<ArgBufMode, MVKDescriptorGPULayout::x>(*binding, enc, base, auxOffsets, src, srcStride, srcType, start, count)
++#define DISPATCH(x) writeDescriptorSetGPUBuffer<ArgBufMode, MVKDescriptorGPULayout::x>(*binding, enc, base, auxOffsets, src, srcStride, srcType, start, count, set->layout->getDevice())	/* L4D2-launcher patch: pass device */
+ 			case MVKDescriptorGPULayout::None:          break;
+ 			case MVKDescriptorGPULayout::Texture:       DISPATCH(Texture);       break;
+ 			case MVKDescriptorGPULayout::Sampler:       DISPATCH(Sampler);       break;
+@@ -1101,7 +1129,7 @@ static void writeDescriptorSetGPUBuffer(
+ 		while (true) {
+ 			uint32_t numWrite = std::min(count, binding->descriptorCount - start);
+ 			switch (binding->gpuLayout) {
+-#define DISPATCH(x) writeDescriptorSetGPUBuffer<ArgBufMode, MVKDescriptorGPULayout::x>(*binding, enc, base, auxOffsets, src, srcStride, srcType, start, numWrite)
++#define DISPATCH(x) writeDescriptorSetGPUBuffer<ArgBufMode, MVKDescriptorGPULayout::x>(*binding, enc, base, auxOffsets, src, srcStride, srcType, start, numWrite, set->layout->getDevice())	/* L4D2-launcher patch: pass device */
+ 				case MVKDescriptorGPULayout::TexBufSoA:     DISPATCH(TexBufSoA);    break;
+ 				case MVKDescriptorGPULayout::TexSampSoA:    DISPATCH(TexSampSoA);   break;
+ 				case MVKDescriptorGPULayout::Tex2SampSoA:   DISPATCH(Tex2SampSoA);  break;
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
+index c9ce14a..754a408 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
+@@ -928,6 +928,34 @@ public:
+ 	 */
+ 	id<MTLBuffer> getDummyBlitMTLBuffer();
+ 
++	/**
++	 * L4D2-launcher patch: returns a 64 KB zero-filled MTLBuffer used as the
++	 * fallback target for descriptor slots that the application leaves unbound
++	 * but a shader still references.  Without this, MoltenVK writes nil/0 into
++	 * the argument buffer; the GPU then dereferences address 0 and the command
++	 * buffer faults with "Internal Error (0000010c)".  Pointing those slots at
++	 * a real (large, zero-filled) buffer makes the shader read zeros instead
++	 * of faulting — same semantics as VK_EXT_robustness2 nullDescriptor.
++	 */
++	id<MTLBuffer> getDummyNullDescriptorMTLBuffer();
++
++	/**
++	 * L4D2-launcher patch: same purpose as the dummy buffer, but for texture
++	 * slots.  A 1x1 RGBA8 zero-filled 2D texture with read+write usage
++	 * covers both sampled and storage descriptor types.
++	 */
++	id<MTLTexture> getDummyNullDescriptorMTLTexture();
++
++	/**
++	 * L4D2-launcher patch: dedicated sampler for null sampler descriptor
++	 * slots.  Uses linear filtering + repeat addressing so that any shader
++	 * sampling through this fallback gets filtered output (not pixelated /
++	 * nearest-neighbor like the bare default MTLSamplerState).  Important
++	 * for particle/sprite shaders where the visual quality of the null-slot
++	 * fallback shows through.
++	 */
++	id<MTLSamplerState> getDummyNullDescriptorMTLSampler();
++
+ 	/**
+ 	 * Returns whether MTLCommandBuffers can be prefilled.
+ 	 *
+@@ -1096,6 +1124,9 @@ protected:
+ 	std::string _capturePipeFileName;
+ 	id<MTLSamplerState> _defaultMTLSamplerState = nil;
+ 	id<MTLBuffer> _dummyBlitMTLBuffer = nil;
++	id<MTLBuffer> _dummyNullDescriptorMTLBuffer = nil;	// L4D2-launcher patch
++	id<MTLTexture> _dummyNullDescriptorMTLTexture = nil;	// L4D2-launcher patch
++	id<MTLSamplerState> _dummyNullDescriptorMTLSampler = nil;	// L4D2-launcher patch
+ #if MVK_XCODE_16
+ 	id<MTLResidencySet> _residencySet = nil;
+ #endif
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index e1f3c04..374247d 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -112,7 +112,19 @@ MVKMTLDeviceCapabilities::MVKMTLDeviceCapabilities(id<MTLDevice> mtlDev) {
+ #endif
+ 	supportsMac2 = MVK_MACOS;	// Incl Mac2 & MacCatalyst2
+ 
+-	isAppleGPU = supportsApple1;
++	// L4D2-launcher patch: modern Apple Silicon (M2 Pro / M3 / M4 etc.)
++	// no longer reports MTLGPUFamilyApple1 support in some Metal versions,
++	// so `supportsApple1` returns false on M4 Pro even though it IS an
++	// Apple GPU.  That broke our robustImageAccess2 advertisement (and a
++	// dozen other code paths that gate Apple-GPU-only behavior on this
++	// flag).  Use ANY Apple family as the indicator.
++	isAppleGPU = supportsApple1 || supportsApple2 || supportsApple3 ||
++				 supportsApple4 || supportsApple5 || supportsApple6 ||
++				 supportsApple7 || supportsApple8 || supportsApple9
++#if MVK_XCODE_26
++				 || supportsApple10
++#endif
++				 ;
+ 
+ 	if ([mtlDev respondsToSelector: @selector(supportsBCTextureCompression)]) {
+ 		supportsBCTextureCompression = mtlDev.supportsBCTextureCompression;
+@@ -626,9 +638,19 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
+ 			}
+ 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR: {
+ 				auto* robustness2Features = (VkPhysicalDeviceRobustness2FeaturesKHR*)next;
++				// L4D2-launcher patch:
++				// - robustBufferAccess2 stays FALSE: Apple Silicon Metal does
++				//   NOT do safe OOB buffer reads/writes.  Advertising true
++				//   caused DXVK to emit SPIR-V assuming the driver would
++				//   bounds-check buffers, leading to Metal command buffer
++				//   crashes with "Internal Error (0000010c)" on OOB reads.
++				// - robustImageAccess2 stays = isAppleGPU: Metal DOES safely
++				//   clamp out-of-bounds image accesses on Apple GPUs.
++				// - nullDescriptor stays = true (our existing patch — Metal
++				//   gets a real zero-filled buffer for unbound descriptors).
+ 				robustness2Features->robustBufferAccess2 = false;
+ 				robustness2Features->robustImageAccess2 = _gpuCapabilities.isAppleGPU;
+-				robustness2Features->nullDescriptor = false;
++				robustness2Features->nullDescriptor = true;
+ 				break;
+ 			}
+ 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FMA_FEATURES_KHR: {
+@@ -3369,7 +3391,35 @@ MVK_PUBLIC_SYMBOL MTLStorageMode MVKPhysicalDevice::getMTLStorageModeFromVkMemor
+ 	if ( !mvkAreAllFlagsEnabled(vkFlags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ) {
+ #if !MVK_OS_SIMULATOR
+ 		if (_gpuCapabilities.isAppleGPU && mvkAreAllFlagsEnabled(vkFlags, VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) {
+-			return MTLStorageModeMemoryless;
++			// L4D2-launcher fix: MTLStorageModeMemoryless backs the resource in
++			// TILE memory, which is allocated at render-pass EXECUTION time and
++			// is a tiny pool entirely separate from device memory.  When a
++			// pass's combined memoryless attachment footprint exceeds the Apple
++			// GPU tile budget, the kernel fails the lazy allocation with
++			//   IOGPUResource::newResourceWithOptions: IOGPUSysMemory::withOptions failed
++			// and aborts the command buffer as "Internal Error (0000010c)" — even
++			// with 18 GB of device memory free, because tile memory is a separate
++			// pool.  L4D2's first full-scene gameplay frame trips this every time
++			// → VK_ERROR_DEVICE_LOST → the game renders one frame then freezes.
++			// Force real Private (device-memory) backing: the transient
++			// attachment is semantically identical to the app, just stored in
++			// regular VRAM, so there is no execution-time tile allocation that
++			// can fail.  Costs a little bandwidth (the attachment is written out
++			// rather than kept on-tile) — negligible for a 2009-era game with
++			// gigabytes free.  Set MVK_L4D2_FORCE_PRIVATE_RT=0 to A/B back to the
++			// stock memoryless behavior without rebuilding.
++			// DEFAULT REVERTED to stock memoryless: forcing Private made the
++			// allocation fault hit EARLIER (during load vs. first frame),
++			// proving the freeze is GPU memory/resource PRESSURE, not the
++			// memoryless tile budget — Private just adds more resident real
++			// memory and trips the limit sooner.  Keep memoryless (lighter,
++			// gets further).  Set MVK_L4D2_FORCE_PRIVATE_RT=1 to force Private.
++			static int s_force_private = -1;
++			if (s_force_private < 0) {
++				const char* ev = getenv("MVK_L4D2_FORCE_PRIVATE_RT");
++				s_force_private = (ev && ev[0] == '1') ? 1 : 0;
++			}
++			return s_force_private ? MTLStorageModePrivate : MTLStorageModeMemoryless;
+ 		}
+ #endif
+ 		return MTLStorageModePrivate;
+@@ -4854,6 +4904,82 @@ id<MTLBuffer> MVKDevice::getDummyBlitMTLBuffer() {
+ 	return _dummyBlitMTLBuffer;
+ }
+ 
++// L4D2-launcher patch: see header for rationale.  64 KB matches Vulkan's
++// MaxUniformBufferSize so any UBO-style shader read into this fallback stays
++// in-bounds; storage mode Shared lets us memset zeros from the CPU.
++id<MTLBuffer> MVKDevice::getDummyNullDescriptorMTLBuffer() {
++	if ( !_dummyNullDescriptorMTLBuffer ) {
++		lock_guard<mutex> lock(_rezLock);
++		if ( !_dummyNullDescriptorMTLBuffer ) {
++			@autoreleasepool {
++				const NSUInteger kSize = 65536;
++				_dummyNullDescriptorMTLBuffer = [_physicalDevice->_mtlDevice newBufferWithLength: kSize options: MTLResourceStorageModeShared];
++				if (_dummyNullDescriptorMTLBuffer.contents) {
++					memset(_dummyNullDescriptorMTLBuffer.contents, 0, kSize);
++				}
++				_dummyNullDescriptorMTLBuffer.label = @"MVKDummyNullDescriptorBuffer";
++			}
++		}
++	}
++	return _dummyNullDescriptorMTLBuffer;
++}
++
++// L4D2-launcher patch: 1x1 RGBA8 zero-filled 2D texture; covers the common
++// shader sample path where DXVK leaves a texture descriptor null because the
++// D3D9 source shader didn't bind that sampler slot.  ShaderRead+Write so
++// storage-image null slots work — stripping Write made particles/muzzle
++// flashes silently disappear because their compute shaders rely on writing
++// to a render target that DXVK was binding null.  The per-submit blit-zero
++// in MVKQueue still cleans up between submits.
++id<MTLTexture> MVKDevice::getDummyNullDescriptorMTLTexture() {
++	if ( !_dummyNullDescriptorMTLTexture ) {
++		lock_guard<mutex> lock(_rezLock);
++		if ( !_dummyNullDescriptorMTLTexture ) {
++			@autoreleasepool {
++				MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: MTLPixelFormatRGBA8Unorm
++																								 width: 1
++																								height: 1
++																							 mipmapped: NO];
++				desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
++				desc.storageMode = MTLStorageModeShared;
++				_dummyNullDescriptorMTLTexture = [_physicalDevice->_mtlDevice newTextureWithDescriptor: desc];
++				uint32_t zeros = 0;
++				[_dummyNullDescriptorMTLTexture replaceRegion: MTLRegionMake2D(0, 0, 1, 1)
++												  mipmapLevel: 0
++													withBytes: &zeros
++												  bytesPerRow: 4];
++				_dummyNullDescriptorMTLTexture.label = @"MVKDummyNullDescriptorTexture";
++			}
++		}
++	}
++	return _dummyNullDescriptorMTLTexture;
++}
++
++// L4D2-launcher patch: dedicated null sampler with linear filtering and
++// repeat addressing.  Source-engine particle/sprite shaders that sample
++// through a null slot end up using this; linear filtering matches what
++// most rendering paths expect, avoiding the blocky look you'd get from
++// the bare default MTLSamplerState (nearest-neighbor).
++id<MTLSamplerState> MVKDevice::getDummyNullDescriptorMTLSampler() {
++	if ( !_dummyNullDescriptorMTLSampler ) {
++		lock_guard<mutex> lock(_rezLock);
++		if ( !_dummyNullDescriptorMTLSampler ) {
++			@autoreleasepool {
++				MTLSamplerDescriptor* desc = [[MTLSamplerDescriptor new] autorelease];
++				desc.minFilter = MTLSamplerMinMagFilterLinear;
++				desc.magFilter = MTLSamplerMinMagFilterLinear;
++				desc.mipFilter = MTLSamplerMipFilterLinear;
++				desc.sAddressMode = MTLSamplerAddressModeRepeat;
++				desc.tAddressMode = MTLSamplerAddressModeRepeat;
++				desc.rAddressMode = MTLSamplerAddressModeRepeat;
++				desc.supportArgumentBuffers = _physicalDevice->_isUsingMetalArgumentBuffers;
++				_dummyNullDescriptorMTLSampler = [_physicalDevice->_mtlDevice newSamplerStateWithDescriptor: desc];
++			}
++		}
++	}
++	return _dummyNullDescriptorMTLSampler;
++}
++
+ MTLCompileOptions* MVKDevice::getMTLCompileOptions(uint32_t fpFastMathFlags,
+ 												   bool preserveInvariance) {
+ 	MTLCompileOptions* mtlCompOpt = [MTLCompileOptions new];
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDeviceMemory.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDeviceMemory.mm
+index 27d634f..a248952 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDeviceMemory.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDeviceMemory.mm
+@@ -189,6 +189,23 @@ void MVKDeviceMemory::removeImageMemoryBinding(MVKDeviceMemory** pMem, MVKImageM
+ 
+ // Ensures that this instance is backed by a MTLHeap object,
+ // creating the MTLHeap if needed, and returns whether it was successful.
++// L4D2-launcher diagnostic: running tally of MTL-backed VkDeviceMemory so the
++// command-buffer fault handler (MVKQueue.mm) can report how much GPU memory was
++// allocated at the moment of an IOGPUSysMemory::withOptions / 0x010c abort —
++// which distinguishes a true out-of-memory (tally near device size) from a
++// limit/internal failure (tally small).  Plain globals: a few races only skew
++// the ballpark, which is all we need.  External linkage so MVKQueue can read.
++uint64_t g_mvkL4D2AllocBytes = 0;
++uint32_t g_mvkL4D2AllocCount = 0;
++static int s_l4d2_alloc_dbg = -1;
++static bool l4d2AllocDbg() {
++	if (s_l4d2_alloc_dbg < 0) {
++		const char* ev = getenv("MVK_L4D2_DEBUG");
++		s_l4d2_alloc_dbg = (ev && ev[0] == '1') ? 1 : 0;
++	}
++	return s_l4d2_alloc_dbg != 0;
++}
++
+ bool MVKDeviceMemory::ensureMTLHeap() {
+ 
+ 	if (_mtlHeap) { return true; }
+@@ -224,7 +241,18 @@ bool MVKDeviceMemory::ensureMTLHeap() {
+ 	heapDesc.size = _allocationSize;
+ 	_mtlHeap = [getMTLDevice() newHeapWithDescriptor: heapDesc];	// retained
+ 	[heapDesc release];
+-	if (!_mtlHeap) { return false; }
++	if (!_mtlHeap) {
++		fprintf(stderr, "[mvk-l4d2-alloc] HEAP alloc FAILED: size=%.1f MB mode=%lu "
++						"(running total before fail: %.1f MB across %u allocs)\n",
++				_allocationSize/1048576.0, (unsigned long)_mtlStorageMode,
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
++		return false;
++	}
++	g_mvkL4D2AllocBytes += _allocationSize; g_mvkL4D2AllocCount++;
++	if (l4d2AllocDbg())
++		fprintf(stderr, "[mvk-l4d2-alloc] HEAP %.1f MB mode=%lu  → total=%.1f MB / %u allocs\n",
++				_allocationSize/1048576.0, (unsigned long)_mtlStorageMode,
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
+ 
+ 	propagateDebugName();
+ 
+@@ -239,7 +267,11 @@ bool MVKDeviceMemory::ensureMTLBuffer() {
+ 
+ 	NSUInteger memLen = mvkAlignByteCount(_allocationSize, getMetalFeatures().mtlBufferAlignment);
+ 
+-	if (memLen > getMetalFeatures().maxMTLBufferSize) { return false; }
++	if (memLen > getMetalFeatures().maxMTLBufferSize) {
++		fprintf(stderr, "[mvk-l4d2-alloc] BUFFER request %.1f MB EXCEEDS maxMTLBufferSize %.1f MB — rejected\n",
++				memLen/1048576.0, getMetalFeatures().maxMTLBufferSize/1048576.0);
++		return false;
++	}
+ 
+ 	id<MTLBuffer> buf;
+ 	// If host memory was already allocated, it is copied into the new MTLBuffer, and then released.
+@@ -261,7 +293,19 @@ bool MVKDeviceMemory::ensureMTLBuffer() {
+ 	} else {
+ 		buf = [getMTLDevice() newBufferWithLength: memLen options: getMTLResourceOptions()];     // retained
+ 	}
+-	if (!buf) { return false; }
++	if (!buf) {
++		fprintf(stderr, "[mvk-l4d2-alloc] BUFFER alloc FAILED: size=%.1f MB heap=%p "
++						"(running total before fail: %.1f MB across %u allocs)\n",
++				memLen/1048576.0, _mtlHeap,
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
++		return false;
++	}
++	g_mvkL4D2AllocBytes += memLen; g_mvkL4D2AllocCount++;
++	if (l4d2AllocDbg())
++		fprintf(stderr, "[mvk-l4d2-alloc] BUFFER %.1f MB mode=%lu%s  → total=%.1f MB / %u allocs\n",
++				memLen/1048576.0, (unsigned long)_mtlStorageMode,
++				_mtlHeap ? " (in-heap)" : "",
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
+ 	_device->makeResident(buf);
+ 	_device->getLiveResources().add(buf);
+ 	_pMemory = isMemoryHostAccessible() ? buf.contents : nullptr;
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index 7357ff1..c64ed05 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -377,8 +377,19 @@ MVKPipelineLayout* MVKPipelineLayout::Create(MVKDevice* device, const VkPipeline
+ 
+ 	for (uint32_t stage = 0; stage < kMVKShaderStageCount; stage++) {
+ 		ret->_pushConstantResourceIndices[stage] = static_cast<uint8_t>(ret->_mtlResourceCounts.stages[stage].bufferIndex);
+-		if (ret->stageUsesPushConstants(static_cast<MVKShaderStage>(stage)))
+-			++ret->_mtlResourceCounts.stages[stage].bufferIndex;
++		// L4D2-launcher patch: ALWAYS reserve one Metal buffer slot per stage
++		// for the push-constant range, even if this stage's shader variant
++		// doesn't reference push constants.  Required for DXVK 1.10.3 D3D9
++		// path: DXVK shares a pipeline layout across multiple shader variants
++		// where SOME use the render_state push constants and some don't.
++		// Without this, the MSL converter assigns descriptor-set-0's first
++		// uniform buffer (cbuffer_t) to Metal slot 0, colliding with the
++		// push-constant struct also at slot 0, and Metal rejects with
++		// "cannot reserve 'buffer' resource location at index 0".  Cost: one
++		// wasted Metal buffer slot per stage (out of 31 available) when the
++		// shader doesn't use push constants — free.  Fixes wide swath of
++		// fragment-shader pipeline failures on Apple Silicon under MAB=off.
++		++ret->_mtlResourceCounts.stages[stage].bufferIndex;
+ 	}
+ 
+ 	for (size_t i = 0; i < layouts.size(); i++) {
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
+index 42e5646..54e03dc 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
+@@ -169,7 +169,16 @@ id<MTLCommandBuffer> MVKQueue::getMTLCommandBuffer(MVKCommandUse cmdUse, bool re
+ 
+ 	MTLCommandBufferDescriptor* mtlCmdBuffDesc = [MTLCommandBufferDescriptor new];	// temp retain
+ 	mtlCmdBuffDesc.retainedReferences = retainRefs;
+-	if (getMVKConfig().debugMode) {
++	// L4D2-launcher patch: record per-encoder error info so we can diagnose
++	// MTLCommandBufferErrorInternal (0x010c) failures by encoder name +
++	// signposts.  Gated behind MVK_L4D2_DEBUG=1 (checked once) OR MoltenVK's
++	// own debugMode, so the default play path pays nothing.
++	static int s_mvk_l4d2_debug = -1;
++	if (s_mvk_l4d2_debug < 0) {
++		const char* ev = getenv("MVK_L4D2_DEBUG");
++		s_mvk_l4d2_debug = (ev && ev[0] == '1') ? 1 : 0;
++	}
++	if (getMVKConfig().debugMode || s_mvk_l4d2_debug) {
+ 		mtlCmdBuffDesc.errorOptions |= MTLCommandBufferErrorOptionEncoderExecutionStatus;
+ 	}
+ 	mtlCmdBuff = [_mtlQueue commandBufferWithDescriptor: mtlCmdBuffDesc];
+@@ -257,26 +266,83 @@ void MVKQueue::handleMTLCommandBufferError(id<MTLCommandBuffer> mtlCmdBuff) {
+ 				 (mtlCmdBuff.label ? mtlCmdBuff.label.UTF8String : ""),
+ 				 mtlCmdBuff.error.code, mtlCmdBuff.error.localizedDescription.UTF8String);
+ 
++	// L4D2-launcher patch: log per-encoder error info + shader logs to stderr,
++	// gated behind the MVK_L4D2_DEBUG=1 environment variable.  This is THE
++	// diagnostic for Apple Silicon command-buffer failures (it identifies the
++	// exact Metal encoder / Source render pass that faulted), but it's noisy
++	// when a fault repeats every frame, so it's off by default.  Checked once
++	// and cached.  Paired with the unconditional errorOptions |= Encoder
++	// ExecutionStatus in getMTLCommandBuffer() so the info is captured even
++	// outside MoltenVK's own debugMode.
++	static int s_mvk_l4d2_debug = -1;
++	if (s_mvk_l4d2_debug < 0) {
++		const char* ev = getenv("MVK_L4D2_DEBUG");
++		s_mvk_l4d2_debug = (ev && ev[0] == '1') ? 1 : 0;
++	}
++	if (!s_mvk_l4d2_debug) { return; }
++
++	static int s_logged_encoder_info = 0;
+ 	if (NSArray<id<MTLCommandBufferEncoderInfo>>* mtlEncInfo = mtlCmdBuff.error.userInfo[MTLCommandBufferEncoderInfoErrorKey]) {
+-		MVKLogInfo("Encoders for %p \"%s\":", mtlCmdBuff, mtlCmdBuff.label ? mtlCmdBuff.label.UTF8String : "");
++		fprintf(stderr, "[mvk-l4d2-patch] Encoders for %p \"%s\" (err code %ld: %s):\n", mtlCmdBuff,
++				mtlCmdBuff.label ? mtlCmdBuff.label.UTF8String : "",
++				(long)mtlCmdBuff.error.code,
++				mtlCmdBuff.error.localizedDescription.UTF8String);
+ 		for (id<MTLCommandBufferEncoderInfo> enc in mtlEncInfo) {
+-			MVKLogInfo(" - %s: %s", enc.label.UTF8String, mvkStringFromMTLCommandEncoderErrorState(enc.errorState));
++			fprintf(stderr, "[mvk-l4d2-patch]  - %s: %s\n",
++					enc.label.UTF8String,
++					mvkStringFromMTLCommandEncoderErrorState(enc.errorState));
+ 			if (enc.debugSignposts.count > 0) {
+-				MVKLogInfo("   Debug signposts:");
++				fprintf(stderr, "[mvk-l4d2-patch]    Debug signposts:\n");
+ 				for (NSString* signpost in enc.debugSignposts) {
+-					MVKLogInfo("    - %s", signpost.UTF8String);
++					fprintf(stderr, "[mvk-l4d2-patch]     - %s\n", signpost.UTF8String);
+ 				}
+ 			}
+ 		}
++		s_logged_encoder_info++;
++	} else if (s_logged_encoder_info < 3) {
++		// No per-encoder info (Metal discards it on a hard GPU memory fault).
++		// Dump the FULL userInfo dictionary instead — for an allocation/OOM
++		// abort (IOGPUSysMemory::withOptions failed) the real signal is in
++		// NSUnderlyingError, whose domain+code identify the failure class
++		// (e.g. an IOAccelerator/IOGPU error vs. a true OOM).  This is what
++		// finally names a 0x010c that has no encoder attribution.
++		NSError* err = mtlCmdBuff.error;
++		fprintf(stderr, "[mvk-l4d2-patch] cmdbuf %p error has no encoder info "
++						"(domain %s, code %ld: %s, %lu userInfo keys):\n",
++				mtlCmdBuff, err.domain.UTF8String, (long)err.code,
++				err.localizedDescription.UTF8String,
++				(unsigned long)err.userInfo.count);
++		for (NSString* key in err.userInfo) {
++			id val = err.userInfo[key];
++			fprintf(stderr, "[mvk-l4d2-patch]    userInfo[%s] = %s\n",
++					key.UTF8String,
++					[[val description] UTF8String]);
++			// Recurse one level into the underlying error — that's where the
++			// IOAccelerator/IOGPU sub-code lives.
++			if ([val isKindOfClass:[NSError class]]) {
++				NSError* ue = (NSError*)val;
++				fprintf(stderr, "[mvk-l4d2-patch]      underlying: domain %s code %ld (%s)\n",
++						ue.domain.UTF8String, (long)ue.code,
++						ue.localizedDescription.UTF8String);
++				for (NSString* uk in ue.userInfo) {
++					fprintf(stderr, "[mvk-l4d2-patch]        underlying.userInfo[%s] = %s\n",
++							uk.UTF8String, [[ue.userInfo[uk] description] UTF8String]);
++				}
++			}
++		}
++		// L4D2-launcher diagnostic: how much GPU memory was allocated when the
++		// fault hit?  Near device size → true OOM; small → a limit/internal
++		// failure (resource count, address space, residency).  Tally lives in
++		// MVKDeviceMemory.mm.
++		extern uint64_t g_mvkL4D2AllocBytes;
++		extern uint32_t g_mvkL4D2AllocCount;
++		fprintf(stderr, "[mvk-l4d2-patch]    GPU mem allocated at fault: %.1f MB across %u VkDeviceMemory allocs\n",
++				g_mvkL4D2AllocBytes/1048576.0, g_mvkL4D2AllocCount);
++		s_logged_encoder_info++;
+ 	}
+ 
+-	bool isFirstMsg = true;
+ 	for (id<MTLFunctionLog> log in mtlCmdBuff.logs) {
+-		if (isFirstMsg) {
+-			MVKLogInfo("Shader log messages:");
+-			isFirstMsg = false;
+-		}
+-		MVKLogInfo("%s", log.description.UTF8String);
++		fprintf(stderr, "[mvk-l4d2-patch] shader log: %s\n", log.description.UTF8String);
+ 	}
+ }
+ 
+@@ -465,6 +531,16 @@ VkResult MVKQueueCommandBufferSubmission::execute() {
+ 
+ 	_queue->_submissionCaptureScope->beginScope();
+ 
++	// L4D2-launcher patch: REVERTED 2026-05-24 — per-submit blit-zero of the
++	// null dummies caused regression to constant black flashes.  Most likely
++	// cause: the wrapper CB carrying the blit gets committed AFTER the game's
++	// CBs in the same submit, so the zero takes effect only for the NEXT
++	// submit's game work — meaning the active submit still uses whatever was
++	// in the dummies from before.  Combined with R+W texture usage Metal
++	// hazard tracking flagged the cross-encoder access patterns and the
++	// command buffers were failing under load.  Reverting; cross-shader
++	// dummy pollution → occasional rainbow corruption is the accepted trade.
++
+ 	// If using encoded semaphore waiting, do so now.
+ 	for (auto& ws : _waitSemaphores) { ws.encodeWait(getActiveMTLCommandBuffer()); }
+ 
+diff --git a/MoltenVK/MoltenVK/Utility/MVKFoundation.cpp b/MoltenVK/MoltenVK/Utility/MVKFoundation.cpp
+index 6d718ba..c2ba548 100644
+--- a/MoltenVK/MoltenVK/Utility/MVKFoundation.cpp
++++ b/MoltenVK/MoltenVK/Utility/MVKFoundation.cpp
+@@ -135,7 +135,18 @@ const char* mvkVkComponentSwizzleName(VkComponentSwizzle swizzle) {
+ 	}
+ }
+ 
+-bool mvkSupportsBufferDeviceAddress() { return mvkOSVersionIsAtLeast(13.0, 16.0, 1.0); }
++bool mvkSupportsBufferDeviceAddress() {
++	// L4D2-launcher fix: this gates bufferDeviceAddress on macOS>=13, but the
++	// version comes from NSProcessInfo, which macOS CLAMPS to 10.16 inside the
++	// wine process (wine64 has a pre-11 deployment target). So on macOS 26 it
++	// wrongly returns false, disabling the Vulkan-1.2 feature DXVK 2.x requires
++	// -> "Failed to create D3D device". Apple Silicon on macOS 26 fully supports
++	// bufferDeviceAddress (Metal 3 GPU addresses), so force it on. Done here, not
++	// via SYSTEM_VERSION_COMPAT=0, because that env var flips the process OS
++	// context and triggers a Rosetta AOT re-translation of this dylib that fails
++	// code-signature attachment.
++	return true;
++}
+ 
+ 
+ #pragma mark -

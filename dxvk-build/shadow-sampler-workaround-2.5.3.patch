@@ -1,0 +1,137 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 5679c1a..09fcef8 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -4480,8 +4480,12 @@ namespace dxvk {
+     DxvkDeviceFeatures supported = adapter->features();
+     DxvkDeviceFeatures enabled = {};
+ 
+-    // Geometry shaders are used for some meta ops
+-    enabled.core.features.geometryShader = VK_TRUE;
++    // Geometry shaders are used for some meta ops.
++    // L4D2-launcher fix (#61): request only if the device supports it. MoltenVK
++    // on Apple Silicon has no geometry-shader stage, so the unconditional VK_TRUE
++    // made vkCreateDevice fail ("Failed to create D3D device"). D3D9 has no GS
++    // stage, so gating this off is safe — only DXVK's optional meta ops lose it.
++    enabled.core.features.geometryShader = supported.core.features.geometryShader;
+     enabled.core.features.robustBufferAccess = VK_TRUE;
+ 
+     enabled.vk12.samplerMirrorClampToEdge = VK_TRUE;
+@@ -4508,7 +4512,10 @@ namespace dxvk {
+     enabled.core.features.sampleRateShading = VK_TRUE;
+     enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
+     enabled.core.features.shaderClipDistance = VK_TRUE;
+-    enabled.core.features.shaderCullDistance = VK_TRUE;
++    // L4D2-launcher fix (#61): MoltenVK/Apple Silicon doesn't expose
++    // shaderCullDistance → unconditional VK_TRUE failed vkCreateDevice. D3D9
++    // doesn't use cull distance, so gating it is safe.
++    enabled.core.features.shaderCullDistance = supported.core.features.shaderCullDistance;
+ 
+     // Ensure we support real BC formats and unofficial vendor ones.
+     enabled.core.features.textureCompressionBC = VK_TRUE;
+diff --git a/src/d3d9/d3d9_include.h b/src/d3d9/d3d9_include.h
+index df35f10..46d3a34 100644
+--- a/src/d3d9/d3d9_include.h
++++ b/src/d3d9/d3d9_include.h
+@@ -49,7 +49,10 @@
+ #endif
+ 
+ // MinGW headers are broken. Who'dve guessed?
+-#ifndef _MSC_VER
++// L4D2-launcher build fix: mingw-w64 14.0+ already declares a complete
++// _D3DDEVINFO_RESOURCEMANAGER in d3d9types.h, so this workaround typedef now
++// collides — skip it on GCC/mingw.
++#if !defined(_MSC_VER) && !defined(__GNUC__)
+ typedef struct _D3DDEVINFO_RESOURCEMANAGER
+ {
+   char dummy;
+diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
+index d7cdc67..3a909cd 100644
+--- a/src/dxso/dxso_compiler.cpp
++++ b/src/dxso/dxso_compiler.cpp
+@@ -760,8 +760,13 @@ namespace dxvk {
+       DclSampler(idx, binding, samplerType, false, implicit);
+ 
+       if (samplerType != SamplerTypeTexture3D) {
+-        // We could also be depth compared!
+-        DclSampler(idx, binding, samplerType, true, implicit);
++        // L4D2-launcher patch: alias the depth-compare sampler to the color one.
++        // MoltenVK rejects two textures/samplers declared at the same Metal slot
++        // (SPIRV-Cross emits both at [[texture(N)]]/[[sampler(N)]] → Metal pipeline
++        // compile fails). Share one descriptor; shadow compare is done in software
++        // at the emitSample call site below.
++        // Was: DclSampler(idx, binding, samplerType, true, implicit);
++        m_samplers[idx].depth[samplerType] = m_samplers[idx].color[samplerType];
+       }
+ 
+       const uint32_t offset = idx * 2;
+@@ -777,7 +782,9 @@ namespace dxvk {
+         DclSampler(idx, binding, samplerType, false, implicit);
+ 
+         if (samplerType != SamplerTypeTexture3D)
+-          DclSampler(idx, binding, samplerType, true, implicit);
++          // L4D2-launcher patch: alias depth→color (see emitDclSampler note above).
++          // Was: DclSampler(idx, binding, samplerType, true, implicit);
++          m_samplers[idx].depth[samplerType] = m_samplers[idx].color[samplerType];
+       }
+     }
+ 
+@@ -2929,14 +2936,37 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+         fetch4 = m_module.opCompositeConstruct(bvec4_t, indices.size(), indices.data());
+       }
+ 
++      // L4D2-launcher patch: software shadow compare.  Because emitDclSampler now
++      // aliases the depth descriptor to the color one (MoltenVK can't bind a
++      // separate depth-compare sampler at the same Metal slot), we must NOT emit a
++      // hardware Dref against it.  For a shadow (depth) sample: take a REGULAR vec4
++      // sample (reference = 0 suppresses the Dref path in emitSample), then compute
++      // the shadow factor in SPIR-V as (sampled.r >= reference) ? 1.0 : 0.0.
++      uint32_t emitSampleTypeId = typeId;
++      if (depth) {
++        auto vec4Type    = result.type;
++        vec4Type.ccount  = 4;
++        emitSampleTypeId = getVectorTypeId(vec4Type);
++      }
++
+       result.id = this->emitSample(
+-        typeId,
++        emitSampleTypeId,
+         sampler,
+         texcoordVar,
+-        reference,
++        depth ? 0u : reference,
+         fetch4,
+         imageOperands);
+ 
++      if (depth) {
++        const uint32_t fp32    = m_module.defFloatType(32);
++        const uint32_t zeroIdx = 0;
++        uint32_t sampledR = m_module.opCompositeExtract(fp32, result.id, 1, &zeroIdx);
++        uint32_t cmp      = m_module.opFOrdGreaterThanEqual(bool_t, sampledR, reference);
++        result.id = m_module.opSelect(fp32, cmp,
++                                       m_module.constf32(1.0f),
++                                       m_module.constf32(0.0f));
++      }
++
+       // If we are sampling depth we've already specc'ed this!
+       // This path is always size 4 because it only hits on color.
+       if (isNull != 0) {
+diff --git a/src/dxvk/dxvk_adapter.cpp b/src/dxvk/dxvk_adapter.cpp
+index 1285c4e..b4b50bc 100644
+--- a/src/dxvk/dxvk_adapter.cpp
++++ b/src/dxvk/dxvk_adapter.cpp
+@@ -402,7 +402,13 @@ namespace dxvk {
+     // Require robustBufferAccess2 since we use the robustness alignment
+     // info in a number of places, and require null descriptor support
+     // since we no longer have a fallback for those in the backend
+-    enabledFeatures.extRobustness2.robustBufferAccess2 = VK_TRUE;
++    // L4D2-launcher fix: MoltenVK on Apple Silicon does NOT expose
++    // robustBufferAccess2, so the unconditional VK_TRUE fails vkCreateDevice
++    // (VK_ERROR_FEATURE_NOT_PRESENT — and racily DEADLOCKS MoltenVK instead of
++    // returning cleanly). Gate it on support; robustBufferAccess (v1) is still
++    // requested by the D3D9 frontend. EXPERIMENTAL: DXVK 2.x assumes the v2
++    // robustness-alignment in places, so watch for OOB / 0x010c faults.
++    enabledFeatures.extRobustness2.robustBufferAccess2 = m_deviceFeatures.extRobustness2.robustBufferAccess2;
+     enabledFeatures.extRobustness2.robustImageAccess2 = m_deviceFeatures.extRobustness2.robustImageAccess2;
+     enabledFeatures.extRobustness2.nullDescriptor = VK_TRUE;
+ 

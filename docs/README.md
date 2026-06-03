@@ -264,10 +264,12 @@ WINED3D_RENDERER=gl               # with --wined3d: force GL backend
 
 Full list with cause/workaround/status: [03 — Known issues](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md). The big ones:
 
-- **HDR / DX9 shading is off.** The engine logs `HDR Disabled` and renders LDR lightmaps (flat,
-  overexposed — interiors as bright as exteriors). dxlevel-forcing alone didn't fix it; the leading suspect
-  is DXVK 1.10.3 not surfacing the FP16 blendable HDR render target Source checks for. This is **Phase 1** of
-  the [Roadmap](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md).
+- **HDR / DX9 shading is off.** The engine renders flat, overexposed LDR lighting with no real shadows
+  (interiors as bright as exteriors) — the game is **DX8-effective**. **DXVK ruled out (2026-06-02):** a fully
+  patched + rebuilt DXVK **2.5.3** was made to render on MoltenVK and shows the *same* flat, HDR-off lighting
+  as 1.10.3 — so HDR is **not** a DXVK FP16-format problem. The real lever is getting the engine to actually
+  run **DX9.5** shading (engine / dxsupport / dxlevel + Source's HDR detection). This is **Phase 1**; see
+  [roadmap A1](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) for the full play-by-play.
 - **Online multiplayer doesn't work yet.** The bridge proxies lobbies, P2P, the server browser, and auth to
   real Mac Steam, but the engine is never put into Steam "online mode" (`SteamServersConnected_t` is
   blacklisted because firing it currently hangs). This is **Phase 2**.

@@ -1,0 +1,201 @@
+diff --git a/src/d3d10/d3d10_interfaces.h b/src/d3d10/d3d10_interfaces.h
+index aa028ab..e49a398 100644
+--- a/src/d3d10/d3d10_interfaces.h
++++ b/src/d3d10/d3d10_interfaces.h
+@@ -2,8 +2,10 @@
+ 
+ #include "d3d10_include.h"
+ 
+-#ifdef _MSC_VER
++// L4D2-launcher patch: mingw-w64 14.0+ already declares ID3D10StateBlock's
++// UUID in its d3d10 headers, so re-declaring here errors out with redefinition.
++#if defined(_MSC_VER)
+ struct __declspec(uuid("0803425a-57f5-4dd6-9465-a87570834a08")) ID3D10StateBlock;
+-#else
++#elif !defined(__MINGW64_VERSION_MAJOR)
+ __CRT_UUID_DECL(ID3D10StateBlock, 0x0803425a,0x57f5,0x4dd6,0x94,0x65,0xa8,0x75,0x70,0x83,0x4a,0x08);
+ #endif
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 734a7a0..8cc2bbf 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -3891,10 +3891,28 @@ namespace dxvk {
+     DxvkDeviceFeatures supported = adapter->features();
+     DxvkDeviceFeatures enabled = {};
+ 
+-    // Geometry shaders are used for some meta ops
+-    enabled.core.features.geometryShader = VK_TRUE;
++    // Geometry shaders are used for some meta ops.
++    // L4D2-launcher fix: request only if the device supports it.  Stock DXVK
++    // forces VK_TRUE, but MoltenVK on Apple Silicon doesn't expose
++    // geometryShader, so the unconditional request made vkCreateDevice fail
++    // ("Failed to create D3D device").  D3D9 has no geometry-shader stage, so
++    // gating this off is safe — only DXVK's optional meta ops lose it, and
++    // L4D2 renders fine without (this is what the old byte-patch achieved,
++    // minus the binary corruption).
++    enabled.core.features.geometryShader = supported.core.features.geometryShader;
+     enabled.core.features.robustBufferAccess = VK_TRUE;
+     enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2;
++    // L4D2-launcher fix: ALSO request robustImageAccess2 when the driver
++    // advertises it.  Our patched MoltenVK exposes it on Apple Silicon
++    // (isAppleGPU) so Metal bounds-checks image/texel loads, but stock DXVK
++    // 1.10.3 never enables it — leaving out-of-bounds image access the only
++    // unguarded memory path (buffers are already covered by robustBufferAccess
++    // above).  An unguarded OOB texelFetch / image load is exactly what faults
++    // the Metal command buffer with Internal Error (0x010c) and no encoder
++    // info, every frame a given shader runs.  Enabling this makes those loads
++    // return zeros instead of faulting — same protection robustBufferAccess
++    // gives buffers.
++    enabled.extRobustness2.robustImageAccess2 = supported.extRobustness2.robustImageAccess2;
+ 
+     enabled.extMemoryPriority.memoryPriority = supported.extMemoryPriority.memoryPriority;
+ 
+@@ -3921,7 +3939,10 @@ namespace dxvk {
+     enabled.core.features.sampleRateShading = VK_TRUE;
+     enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
+     enabled.core.features.shaderClipDistance = VK_TRUE;
+-    enabled.core.features.shaderCullDistance = VK_TRUE;
++    // L4D2-launcher fix: request only if supported (MoltenVK/Apple Silicon
++    // doesn't expose shaderCullDistance → unconditional VK_TRUE failed
++    // vkCreateDevice).  D3D9 doesn't use cull distance, so this is safe.
++    enabled.core.features.shaderCullDistance = supported.core.features.shaderCullDistance;
+ 
+     // Ensure we support real BC formats and unofficial vendor ones.
+     enabled.core.features.textureCompressionBC = VK_TRUE;
+diff --git a/src/d3d9/d3d9_include.h b/src/d3d9/d3d9_include.h
+index 8762265..db3acf2 100644
+--- a/src/d3d9/d3d9_include.h
++++ b/src/d3d9/d3d9_include.h
+@@ -78,16 +78,19 @@
+ #endif
+ 
+ // MinGW headers are broken. Who'dve guessed?
+-#ifndef _MSC_VER
++// L4D2-launcher patch: mingw-w64 14.0+ already defines this typedef
++// (d3d9types.h has a complete _D3DDEVINFO_RESOURCEMANAGER struct).
++// Skip the workaround typedef on newer toolchains.
++#if !defined(_MSC_VER) && !defined(__GNUC__)
+ typedef struct _D3DDEVINFO_RESOURCEMANAGER
+ {
+   char dummy;
+ } D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
++#endif
+ 
+-#ifndef __WINE__
++#if !defined(_MSC_VER) && !defined(__WINE__)
+ extern "C" WINUSERAPI WINBOOL WINAPI SetProcessDPIAware(VOID);
+ #endif
+-#endif
+ 
+ // This is the managed pool on D3D9Ex, it's just hidden!
+ #define D3DPOOL_MANAGED_EX D3DPOOL(6)
+diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
+index b68608a..f4775db 100644
+--- a/src/dxso/dxso_compiler.cpp
++++ b/src/dxso/dxso_compiler.cpp
+@@ -253,7 +253,15 @@ namespace dxvk {
+     info.inputMask = m_inputMask;
+     info.outputMask = m_outputMask;
+     info.pushConstOffset = m_pushConstOffset;
+-    info.pushConstSize = m_pushConstOffset;
++    // L4D2-launcher fix: stock DXVK 1.10.3 sets pushConstSize from
++    // m_pushConstOffset (a copy/paste bug, corrected upstream later).  That
++    // produces a push-constant VkRange too small to cover the field the
++    // shader actually reads — e.g. the fragment alpha-test reads alphaRef at
++    // byte offset 24, but the bug yields a range that doesn't reach it.
++    // Desktop GPUs don't bounds-check push constants so they tolerate it;
++    // Apple Silicon Metal faults the command buffer with Internal Error
++    // (0x010c) on the out-of-bounds device load every frame.  Use the real size.
++    info.pushConstSize = m_pushConstSize;
+ 
+     return new DxvkShader(info, m_module.compile());
+   }
+@@ -827,8 +835,14 @@ namespace dxvk {
+       DclSampler(idx, binding, samplerType, false, implicit);
+ 
+       if (samplerType != SamplerTypeTexture3D) {
+-        // We could also be depth compared!
+-        DclSampler(idx, binding, samplerType, true, implicit);
++        // L4D2-launcher patch: alias the depth-compare sampler to the color
++        // sampler at the same binding.  Vulkan allows separate descriptors
++        // for color + depth at the same binding, but MoltenVK's SPIRV-Cross
++        // emits two MSL texture declarations at the same [[texture(N)]] slot
++        // which Metal rejects.  Software shadow compare in SampleImage below
++        // still produces correct 0.0/1.0 shadow factors using the aliased
++        // single descriptor.
++        m_samplers[idx].depth[samplerType] = m_samplers[idx].color[samplerType];
+       }
+     }
+     else {
+@@ -840,7 +854,7 @@ namespace dxvk {
+         DclSampler(idx, binding, samplerType, false, implicit);
+ 
+         if (samplerType != SamplerTypeTexture3D)
+-          DclSampler(idx, binding, samplerType, true, implicit);
++          m_samplers[idx].depth[samplerType] = m_samplers[idx].color[samplerType];
+       }
+     }
+ 
+@@ -2975,15 +2989,37 @@ void DxsoCompiler::emitControlFlowGenericLoop(
+         fetch4 = m_module.opCompositeConstruct(bvec4_t, indices.size(), indices.data());
+       }
+ 
++      // L4D2-launcher patch: when the caller wants shadow compare (depth=true)
++      // we still emit a REGULAR sample (no Dref op) because MoltenVK cannot
++      // bind a separate depth-compare sampler at the same Metal texture slot.
++      // The hw shadow compare is then emulated in SPIR-V below — extract .r
++      // from the vec4 sample, compare to the reference, select 1.0 / 0.0.
++      uint32_t emitSampleTypeId = typeId;
++      if (depth) {
++        DxsoVectorType vec4Type = { result.type.ctype, 4 };
++        emitSampleTypeId = getVectorTypeId(vec4Type);
++      }
+       result.id = this->emitSample(
+         projDivider != 0,
+-        typeId,
++        emitSampleTypeId,
+         sampler,
+         texcoordVar,
+-        reference,
++        0,                  // suppress hw shadow compare path inside emitSample
+         fetch4,
+         imageOperands);
+ 
++      if (depth) {
++        // shadow_factor = (sampled.r >= reference) ? 1.0 : 0.0
++        const uint32_t fp32 = m_module.defFloatType(32);
++        const uint32_t zeroIdx = 0;
++        uint32_t sampledR = m_module.opCompositeExtract(fp32, result.id, 1, &zeroIdx);
++        uint32_t bool_t = m_module.defBoolType();
++        uint32_t cmp = m_module.opFOrdGreaterThanEqual(bool_t, sampledR, reference);
++        result.id = m_module.opSelect(fp32, cmp,
++                                       m_module.constf32(1.0f),
++                                       m_module.constf32(0.0f));
++      }
++
+       if (switchProjResult) {
+         uint32_t bool_t = m_module.defBoolType();
+ 
+diff --git a/src/util/config/config.h b/src/util/config/config.h
+index f947272..51f209d 100644
+--- a/src/util/config/config.h
++++ b/src/util/config/config.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <cstdint>
+ #include <string>
+ #include <unordered_map>
+ 
+diff --git a/src/util/util_bit.h b/src/util/util_bit.h
+index 7682ace..3dd33a0 100644
+--- a/src/util/util_bit.h
++++ b/src/util/util_bit.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <cstdint>
++
+ #ifndef _MSC_VER
+ #if defined(__WINE__) && defined(__clang__)
+ #pragma push_macro("_WIN32")
