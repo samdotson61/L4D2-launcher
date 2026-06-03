@@ -45,7 +45,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `L4D2_MVK_RESUME` | `MVK_CONFIG_RESUME_LOST_DEVICE` 0/1 — default 0 (halt on real fault) |
 | `L4D2_MVK_PREFILL` | Command-buffer encoding: `0` deferred (fast, default) … `2`/`3` immediate (raises crash threshold, slow) |
 | `L4D2_MVK_MTLHEAP` | `MVK_CONFIG_USE_MTLHEAP` 0/1 — default 1 *(only in the stashed launcher edits)* |
-| `L4D2_FORCE_HDR` | Re-assert `dxlevel 95` in video.txt on launch *(only in the stashed launcher edits)* |
+| ~~`L4D2_FORCE_HDR`~~ | **REMOVED 2026-06-03.** Re-asserted `dxlevel 95` in video.txt on launch — based on the debunked "dxlevel/DXVK gates HDR" theory. HDR was never gated by dxlevel (engine already runs `mat_dxlevel 100`); it was pinned off by a launch arg, since fixed. See [03-known-issues #1](03-known-issues.md). |
 | `L4D2_WINEDEBUG` | Override Wine debug flags |
 | `WINED3D_RENDERER` | `vulkan` / `gl` for the `--wined3d` path |
 | `MVK_L4D2_DEBUG` | `1` = verbose MoltenVK fault/allocation diagnostics (set by `--diag`) |
@@ -54,13 +54,13 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 ## Default launch args
 
 ```
--novid -vulkan +r_flashlightdepthtexture 0 +mat_hdr_level 1 +mat_queue_mode -1
-+mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4 +mat_hdr_level 2
+-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_picmip 0
++r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4
 ```
 - `-vulkan` routes D3D9 through DXVK (without it the game exits in seconds).
-- `+r_flashlightdepthtexture 0` — flashlight-shadow stopgap (issue #3).
+- `+r_flashlightdepthtexture 1` — dynamic flashlight shadows **on** (was the old `0` stopgap; confirmed working — issue #3).
 - `+mat_queue_mode -1` multicore, `+mat_antialias 4` 4× MSAA, `+mat_picmip 0` max textures, `+r_waterforceexpensive 1`, `+r_shadowrendertotexture 1` — max settings.
-- `+mat_hdr_level 1/2` — **no-ops** in retail (`Unknown command`); kept for parity, do not control HDR.
+- **No `+mat_hdr_level` token.** Both `+mat_hdr_level 1` and `+mat_hdr_level 2` were **removed 2026-06-03**. They were *not* harmless no-ops: although the engine logs `Unknown command "mat_hdr_level"`, it **queues** the unknown convar and applies it the instant `mat_hdr_level` registers during material-system init — pinning HDR to level 1 (LDR+bloom) every launch, which forced the flat/fullbright look. With the token gone, the engine's true hardware-derived default (level 2, full HDR) stands. See [03-known-issues #1](03-known-issues.md).
 
 ## Game graphics settings
 

@@ -12,7 +12,7 @@ The reliable way to test a change. It launches the game via `play-l4d2.sh --diag
 It reports:
 - `ingame_at` — seconds until gameplay was confirmed (greps `console.log` for `Reserved Wanderers|NextBot tickrate|Initiating Reserved`).
 - `fault_at` + `faults(0000010c)` — first fault time and total `0x010c` count (greps `game-stderr.log`).
-- `HDR:` — `HDR Enabled` / `HDR Disabled` / `<none>` (greps `console.log`).
+- `HDR:` — `HDR Enabled` / `HDR Disabled` / `<none>` (greps `console.log`). **Note:** this line is unreliable as the HDR verdict — the real HDR state is read via a VScript probe (see "Reading GPU/engine state" below). The trustworthy console signal is the **absence** of `Level unlit, setting 'mat_fullbright 1'`.
 - FPS — from MoltenVK perf logging.
 - `VERDICT` — `FAULTS xN` or `NO FAULTS, reached in-game, survived Ns`.
 
@@ -42,11 +42,15 @@ MVK_CONFIG_PERFORMANCE_TRACKING=1 MVK_CONFIG_PERFORMANCE_LOGGING_FRAME_COUNT=120
 
 ## Reading GPU/engine state
 
-Because `mat_dxlevel` / `mat_hdr_level` / `developer` are **`Unknown command`** in this retail build, you can't query the dxlevel/HDR from the console. What *does* work:
-- **HDR on/off:** the `HDR Enabled`/`HDR Disabled` line in `console.log` (also surfaced by the harness's `HDR:` field).
+Because `mat_dxlevel` / `mat_hdr_level` / `developer` are **`Unknown command`** in this retail build (and `mat_hdr_level` is additionally **runtime-locked** — see below), you can't query the dxlevel/HDR from the console. What *does* work:
+- **HDR level (the authoritative read):** a **VScript probe**. Drop a `mapspawn.nut` (or equivalent map script) that prints `Convars.GetFloat("mat_hdr_level")`. **`2` = full HDR (correct); `1` = LDR+bloom (the old pinned-off state).** This is how the 2026-06-03 fix was verified: with the bad `+mat_hdr_level 1` launch arg removed, the probe reads **2** (it read **1** while the arg was present).
+- **HDR sanity in the console:** `mat_hdr_level` is **not** logged by `HDR Enabled/Disabled` reliably — instead check that `console.log` does **not** contain `Level unlit, setting 'mat_fullbright 1'` (the fullbright fallback that produced the flat look) and that `mat_fullbright` is not force-set. Both are **absent** in the healthy (HDR-on) state.
+- **DX level:** the VScript probe also reads `mat_dxlevel` → **`100`** (full DX9.5) in the current build. The old "DX8-effective" description is **false**.
 - **Auto-exposure cvars:** `+mat_dynamic_tonemapping` and `+mat_force_tonemap_scale` (no value) print their values — these are real cvars (marked `cheat`).
-- **DXVK device caps:** `left4dead2_d3d9.log` lists the Vulkan feature flags DXVK sees from MoltenVK (this is how we confirmed FP16/SM3.0-class support exists).
+- **DXVK device caps:** `left4dead2_d3d9.log` lists the Vulkan feature flags DXVK sees from MoltenVK (FP16/SM3.0-class support is present). **Note:** DXVK caps are *not* the HDR lever — an instrumented `CheckDeviceFormat` probe confirmed DXVK already returns `A16B16G16R16F` as renderable+blendable (`result=0`/D3D_OK) at init. See [03-known-issues #1](03-known-issues.md).
 - **Adapter identity:** `left4dead2_d3d9.log` → `Apple M4 Pro` (Vulkan vendor `0x106B`, absent from `dxsupport.cfg`).
+
+> **No runtime HDR toggle.** `mat_hdr_level` is hidden from the console/cfg (`Unknown command`) **and** runtime-locked — VScript `Convars.SetValue("mat_hdr_level","2")` is **refused** in every scope tested (map child scope, console/root scope via `listenserver.cfg`→`script_execute`, with and without `sv_cheats`). Material-system **init** is the only window it takes effect, so the only working lever is the launch args. This is why the fix was *removing* the bad `+mat_hdr_level 1` arg rather than setting a "correct" value anywhere.
 
 ## Diagnosing a `0x010c`
 

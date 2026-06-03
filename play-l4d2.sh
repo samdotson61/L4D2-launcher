@@ -79,20 +79,39 @@ STEAM_ARGS=(-no-cef-sandbox)
 #   shadows (r_shadowrendertotexture 1), 4× MSAA (mat_antialias 4) and multicore
 #   (mat_queue_mode -1) — all at native 1512x982.
 #
-#   +mat_hdr_level 1 / +mat_hdr_level 2 are NO-OPS in this retail build: the
-#   engine logs "Unknown command" for both and decides HDR purely from hardware
-#   caps (the D3D9 FP16 blendable-RT report from DXVK).  They are kept only for
-#   byte-parity with the historical playable commit (38dc236); they do NOT enable
-#   HDR, and there is no "initialise at 1 then switch to 2" effect — that was a
-#   debunked theory.  HDR is currently OFF ("HDR Disabled"); enabling it properly
-#   is Phase 1 / A1 (DXVK 2.5.3 or a targeted CheckDeviceFormat patch) — see
-#   docs/08-roadmap.md, NOT these args.
+#   *** HDR "flat / blown-out / no baked shadows": RENDERING SOLVED 2026-06-03 ***
+#   The cause was THIS launcher.  A `+mat_hdr_level 1` token used to live in this
+#   array.  The engine logs "Unknown command mat_hdr_level" for it — but it is NOT
+#   a no-op: the command is QUEUED and applied the instant mat_hdr_level registers
+#   during material-system init, pinning HDR to level 1 (LDR+bloom) every launch.
+#   On L4D2's HDR-only maps, level 1 reads the (empty) LDR lighting lump, so the
+#   engine logs "Level unlit, setting 'mat_fullbright 1'" and renders fullbright —
+#   the exact flat / over-bright / no-baked-shadow symptom.  Deleting the token
+#   lets the engine's true hardware-derived default stand: level 2 (full HDR).
+#   Verified via VScript probe: mat_hdr_level reads 2, "Level unlit" is gone,
+#   mat_fullbright is no longer forced, the maps light correctly.
+#   mat_hdr_level is HIDDEN from console/cfg AND runtime-locked (VScript SetValue
+#   is refused in EVERY scope on this build — child, root, listenserver.cfg), so
+#   init is the only window and "absence of the bad token" IS the fix; there is
+#   nothing to add.  Confirmed RED HERRINGS, do not chase again: DXVK version
+#   (1.10.3 vs 2.5.3), DX8/dxlevel (engine is at mat_dxlevel 100), MSAA, multicore,
+#   exposure/tonemap convars, the FP16 CheckDeviceFormat report (DXVK already
+#   returns A16B16G16R16F blendable=OK at init).  See docs/03-known-issues.md #1.
+#
+#   NOTE — HDR RENDERS BUT IS NOT YET PLAYABLE.  Turning HDR on (this fix) re-triggers
+#   the 0x010c device-lost GPU fault ~25-40s into active play: the FP16 HDR render
+#   targets exhaust the M4 AGX tile-memory budget at the first full-scene frame →
+#   VK_ERROR_DEVICE_LOST → freeze.  Separate open blocker (docs/03-known-issues.md
+#   #2).  Every historical "playable" build was secretly HDR-OFF.  FORCE_PRIVATE_RT
+#   / L4D2_MVK_RESUME / PREFILL / lower-res all fail; next attempt is a pooled-
+#   scratch RT spill in MoltenVK.  So: HDR _or_ playable, not both, for now.
 #
 #   mat_queue_mode -1 keeps multicore ON.  Only the --wined3d path forces it to 0,
 #   and only for that single run (see do_launch_wined3d + _wined3d_restore / C1);
 #   it is never persisted to autoexec.cfg/video.txt any more.
-#   +r_flashlightdepthtexture 0: see the flashlight note above (TEMPORARY stopgap).
-DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 1 +mat_hdr_level 1 +mat_queue_mode -1 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4 +mat_hdr_level 2)
+#   +r_flashlightdepthtexture 1: dynamic flashlight shadows ON (same queued-arg
+#   mechanism; confirmed working).  Replaced the old `0` stopgap.
+DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4)
 
 # ─── Pretty output ────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -589,21 +608,17 @@ assert_max_settings() {
     # One-time snapshot of the pre-launcher video.txt (parallels dxsupport.cfg.orig-*).
     [[ -f "$vid.orig-pre-launcher" ]] || cp "$vid" "$vid.orig-pre-launcher"
     # VideoConfig keys we guarantee.  dxlevel 95 keeps the engine ≥ DX9 so HDR
-    # isn't silently disabled (a sub-90 auto-detect washes the scene out — flat).
+    # isn't silently disabled.
     #
-    # HDR TRADE-OFF (recovered from commit 38dc236 + its stash): full HDR shading
-    # only survives on this M4 AGX stack with **MSAA off + single-threaded**
-    # material system.  4× MSAA + multicore turn the FP16 HDR render targets into
-    # a layout the GPU faults on every frame → the engine falls back to flat/LDR
-    # *and* stutters (0x010c).  These are mutually exclusive on this stack.
-    #   • L4D2_HDR=1  → mat_antialias 1 (MSAA off) + mat_queue_mode 0 (single-thread):
-    #                   the proven HDR recipe (proper shading + shadows).
-    #   • default     → mat_antialias 4 + mat_queue_mode -1: the max-settings build
-    #                   (4× MSAA + multicore), no HDR.
-    local aa=4 qm=-1 mode="max settings (4× MSAA · multicore · no HDR)"
-    if [[ "${L4D2_HDR:-0}" == 1 ]]; then aa=1; qm=0; mode="HDR recipe (MSAA off · single-thread)"; fi
+    # HDR is ON at full max settings.  The old L4D2_HDR=1 toggle that forced MSAA
+    # off + single-thread "so HDR could survive" is GONE: that MSAA/multicore-
+    # breaks-HDR trade-off was a DEBUNKED RED HERRING.  HDR was never disabled by
+    # MSAA or multicore — it was disabled by a stray +mat_hdr_level 1 launch arg
+    # (removed; see the DEFAULT_GAME_ARGS note).  Full HDR now coexists with 4×
+    # MSAA + multicore — exactly the "most successful build" config.
+    local mode="max settings (4× MSAA · multicore · HDR on)"
     local -a keys=(gpu_level mat_antialias mat_forceaniso mat_queue_mode dxlevel)
-    local -a vals=(3         "$aa"         16             "$qm"          95)
+    local -a vals=(3         4             16             -1             95)
     local i k v
     for i in "${!keys[@]}"; do
       k="${keys[$i]}"; v="${vals[$i]}"
@@ -709,6 +724,11 @@ do_launch() {
     # Disable shader fast-math: Source's tonemap exposure curves can hit
     # NaN/Inf paths that AGX faults on under fast-math.
     "MVK_CONFIG_FAST_MATH_ENABLED=0"
+    # 0x010c lever (heavy-frame device-lost): force transient render targets —
+    # including the HDR FP16 targets — to Private storage instead of memoryless
+    # tile memory.  Default 0; set L4D2_MVK_FORCE_PRIVATE_RT=1 to try it (HDR
+    # raised tile-memory pressure and re-triggered the fault under active play).
+    "MVK_L4D2_FORCE_PRIVATE_RT=${L4D2_MVK_FORCE_PRIVATE_RT:-0}"
   )
   # DXVK diagnostics — set DXVK_HUD to overlay info in top-left; set
   # DXVK_LOG_LEVEL to "info" or "debug" for stderr logs.  Both

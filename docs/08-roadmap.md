@@ -14,137 +14,147 @@ at **maximum settings throughout (including multicore rendering)**, and make the
 
 ---
 
-## Where we are (ground truth, 2026-06-02)
+## Where we are (ground truth, 2026-06-02; shading row updated 2026-06-03)
 
-Reconciled against `git HEAD` and the live game folder — supersedes any earlier "HDR works" notes:
+Reconciled against `git HEAD` and the live game folder. **Update 2026-06-03:** the long-standing "HDR off /
+flat lighting" bug is **SOLVED for rendering** — it was the launcher's own `+mat_hdr_level 1` arg (now removed),
+not DXVK or dxlevel. HDR now **renders**. But HDR-on isn't yet **playable**: it re-triggers the `0x010c`
+device-lost (issue #2) ~30 s into active play, so it's **HDR _or_ playable, not both** until that lands. The
+shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) box,
+[A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker), and
+[03-known-issues #1](03-known-issues.md):
 
 | Reality check | State |
 |---|---|
 | `git HEAD` | `8cdc8ca` — *"working dx8 no tonemapping no multiplayer"* |
-| In-game shading | **DX8-effective, HDR Disabled** — flat/overexposed lighting (no proper DX9 shading) |
+| In-game shading | **Full DX9.5 (`mat_dxlevel 100`), HDR _renders_ (`mat_hdr_level 2`)** — proper HDR shading at max settings *(rendering fixed 2026-06-03; but HDR-on isn't yet **playable** — re-triggers the `0x010c` device-lost ~30 s in, see [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) + [A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker))* |
 | Multiplayer | **Not working** — bridge plumbing exists, but the engine is never put into Steam "online mode" |
-| `video.txt` dxlevel | Launcher now asserts `setting.dxlevel 95` on every launch (C2 ✅); `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
-| Multicore | `mat_queue_mode -1` (**on**), now re-asserted in `video.txt` every launch; the `--wined3d` landmine is fixed — see [C1](#c1-neutralise-the-multicore-landmine-must-fix) ✅ |
-| DXVK | **1.10.3** deployed (working). **2.5.3** explored 2026-06-02: stock stash → black screen; a hand-ported + rebuilt 2.5.3 cleared that (0 pipeline fails) + the #61 gating, but then **deadlocks in `vkCreateDevice`** — see [A1](#a1-swap-to-dxvk-253-and-confirm-the-hdr-format) |
+| `video.txt` dxlevel | Launcher now asserts `setting.dxlevel 95` on every launch (C2 ); `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
+| Multicore | `mat_queue_mode -1` (**on**), now re-asserted in `video.txt` every launch; the `--wined3d` landmine is fixed — see [C1](#c1-neutralise-the-multicore-landmine-must-fix) |
+| DXVK | **1.10.3** deployed (working). **2.5.3** explored 2026-06-02 (allocator angle) but **ruled out as the HDR lever** — a fully-patched 2.5.3 renders identically to 1.10.3; HDR was never a DXVK problem (see [A1, SUPERSEDED](#a1-swap-to-dxvk-253-and-confirm-the-hdr-format--superseded)) |
 | Stack | Whisky-Wine 11 · MoltenVK 1.4.1 + patch · Rosetta 2 · macOS 26.x · M4 Pro |
 
 ---
 
 # Phase 1 — Proper shading: HDR + DX9.5 at max settings
 
-**Milestone:** the user confirms proper HDR/DX9 shading (interiors read dark, walls shaded
-correctly), 0 `0x010c` faults, with **every setting maxed (incl. multicore)**.
+> **RENDERING ACHIEVED 2026-06-03 — PLAYABILITY NOT YET MET.** Proper HDR/DX9.5 shading now **renders** **at max settings (4× MSAA + multicore both ON)**. But HDR-on re-triggers the `0x010c` device-lost (see the open work item below), so the Phase 1 *playability* milestone is **not** met: it's currently **HDR _or_ playable, not both**.
+>
+> **Real root cause (of the flat lighting):** the launcher's own `DEFAULT_GAME_ARGS` passed `+mat_hdr_level 1` (and `+mat_hdr_level 2`). The engine logs `Unknown command "mat_hdr_level"` for these — but it is **not** a no-op: the engine **queues** the unknown convar and applies it the instant `mat_hdr_level` registers during material-system init, **pinning HDR to level 1 (LDR+bloom)** every launch. At level 1 on L4D2's HDR-only maps, the engine reads the empty LDR lighting lump, logs `Level unlit, setting 'mat_fullbright 1'`, and renders fullbright — the exact flat/over-bright/no-baked-shadow symptom.
+>
+> **The fix (for rendering):** **delete** both `+mat_hdr_level` tokens from `DEFAULT_GAME_ARGS`. There was nothing to *add* — the fix is the **absence** of the bad token. The engine's true hardware-derived default (level 2, full HDR) then stands. `DEFAULT_GAME_ARGS` is now `-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4`.
+>
+> **Verified this session:** a VScript probe (`Convars.GetFloat`) reads `mat_hdr_level=2` after removal (was `1` with the args); `Level unlit` is gone; `mat_fullbright` is no longer force-set; `mat_dxlevel` reads `100` (full DX9.5). Full HDR **renders** and **coexists** with 4× MSAA and `mat_queue_mode -1`.
+>
+> **But HDR-on isn't playable yet:** enabling HDR re-triggers the `0x010c` device-lost (issue #2) ~30 s into active play — at the first full-scene frame, the FP16 HDR render targets are the extra GPU pressure that tips the marginal M4 AGX tile-memory threshold → `VK_ERROR_DEVICE_LOST` → freeze. Every historical "playable" build was secretly **HDR-off** (even commit 38dc236's "full HDR" title carried the same `+mat_hdr_level 1` pin), so this `0x010c`-under-HDR coupling is **new ground**, uncovered only by finally enabling HDR. See the open work item below.
+>
+> **Bonus:** dynamic flashlight shadows are now ON via `+r_flashlightdepthtexture 1` (was the old `0` stopgap) — same queued-arg mechanism, confirmed working.
+>
+> Full write-up: [03-known-issues #1](03-known-issues.md) (rendering) · [#2](03-known-issues.md) (the playability blocker).
 
-**Why HDR is off.** Source enables HDR only when D3D9 `CheckDeviceFormat` reports an FP16-renderable,
-*blendable* HDR render target (`D3DFMT_A16B16G16R16F`). That capability comes from **DXVK**. Deployed
-DXVK **1.10.3** doesn't surface it the way Source needs, so the engine logs `HDR Disabled` and falls
-back to LDR lightmaps. **dxlevel-forcing alone is proven insufficient** (already tried via `video.txt`
-+ `dxsupport.cfg` + `dxsupport_override.cfg`).
+**Milestone (rendering met; playability NOT met):** HDR/DX9 shading **renders** correctly (interiors read
+dark, walls shaded correctly) at **every setting maxed (incl. multicore)** — but the playability half is
+**open**: HDR-on must survive past the first full-scene frame without the `0x010c` device-lost. Not met until
+[A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker) lands.
 
-### A1. Swap to DXVK 2.5.3 and confirm the HDR format
-**❌ ATTEMPTED 2026-06-02 — the stash regresses; HDR not reached.** Swapped `dxvk_d3d9.dll.253-stash`
-(confirmed `v2.5.3+`) into the deploy path and booted `--diag +map c1m1_hotel`. Result: **black screen +
-audio stutter**, **150 graphics pipelines failed `VK_ERROR_INITIALIZATION_FAILED`**, **9398 kernel
-AGX/IOGPU fault lines**. Root cause is logged unambiguously in `game-stderr.log` — the MSL fragment shaders
-declare a color texture **and** a depth-compare texture at the *same* Metal slot (`texture2d … [[texture(0)]]`
-+ `depth2d … [[texture(0)]]`, plus two `[[sampler(0)]]`), which Metal rejects. That is exactly the bug
-`shadow-sampler-workaround.patch` fixes → **confirmed: the stock 2.5.3 stash does NOT carry our patches.**
-Device creation itself was fine (`geometryShader 0`, `shaderCullDistance 0`, `robustImageAccess2 1`; MAB-off
-is the launcher default) so **#61 was not the blocker**. `A16B16G16R16F`/`HDR Enabled` could not be reached —
-nothing rendered. **Reverted to 1.10.3** (`dxvk-build/dxvk_d3d9.dll.pre-a1`, sha `f9a30c6…`).
+### A0. Fix `0x010c` device-lost under HDR — OPEN (the Phase 1 playability blocker)
+> **OPEN — top remaining Phase 1 work item.** HDR *rendering* is solved (above), but turning HDR on
+> re-triggers the `0x010c` device-lost (`VK_ERROR_DEVICE_LOST`) ~30 s into play (issue #2). The FP16 HDR
+> render targets tip the marginal M4 AGX tile-memory threshold at the first heavy frame. This is the
+> blocker between "HDR renders" and "HDR is playable."
+- **Confirmed red herrings (do not re-chase):** MSAA and multicore are **not** the trigger — HDR faults
+  identically with them on or off. The documented levers (`FORCE_PRIVATE_RT`, `RESUME`, `PREFILL`, lower
+  resolution) all **failed**. The fault is **opaque** — `Internal Error`, no encoder/resource attribution —
+  so it can't be pinned to a draw from logs.
+- **Next untried direction:** a **pooled-scratch render-target spill** in MoltenVK — when a memoryless
+  attachment would overflow, spill it to a single *reused* device buffer (avoiding both the tile overflow
+  and the per-resource resident-memory increase that doomed the naive Private attempt). Requires
+  re-cloning MoltenVK + a non-trivial patch + slow rebuild cycles (~10-min dep build per shot); genuinely
+  **uncertain odds**. Full analysis: [03-known-issues #2](03-known-issues.md).
 
-Original plan (kept for a *future rebuilt* 2.5.3):
-- Back up deployed `bin/dxvk_d3d9.dll` (1.10.3), drop in `dxvk-build/dxvk_d3d9.dll.253-stash`.
-- 2.5.3 needs **MAB-off** + geometry-shader/cull-distance feature gating to create a device on
-  MoltenVK (`#61`). *(Verified met — device creation is not the blocker.)*
-- The shadow-sampler + pushConstSize source patches were authored against 1.10.3 offsets — for 2.5.3
-  they must be **rebased onto 2.5.3 source and rebuilt**. *(Confirmed necessary — the stash lacks them.)*
-- Boot with `DXVK_LOG_LEVEL=info`; grep `left4dead2_d3d9.log` for `A16B16G16R16F` as a
-  renderable+blendable format, and `console.log` for **`HDR Enabled`**.
+> **SUPERSEDED 2026-06-03 — original "Why HDR is off" hypothesis was wrong.** The text below blamed DXVK
+> `CheckDeviceFormat` / dxlevel-forcing. That was a **red herring**: an instrumented probe confirmed DXVK
+> already returns `D3DFMT_A16B16G16R16F` as renderable+blendable (`result=0`/D3D_OK) at init, and the engine
+> runs `mat_dxlevel 100` regardless. HDR was pinned off by the launcher's own `+mat_hdr_level 1` arg (above),
+> not by any DXVK/dxlevel cap. Kept for history:
+>
+> > ~~**Why HDR is off.** Source enables HDR only when D3D9 `CheckDeviceFormat` reports an FP16-renderable,
+> > *blendable* HDR render target (`D3DFMT_A16B16G16R16F`). That capability comes from DXVK. Deployed DXVK
+> > 1.10.3 doesn't surface it the way Source needs, so the engine logs `HDR Disabled` and falls back to LDR
+> > lightmaps. dxlevel-forcing alone is proven insufficient (already tried via `video.txt` + `dxsupport.cfg`
+> > + `dxsupport_override.cfg`).~~
 
-**Next move — paths forward (empirical lean: the fallback):**
-1. **Cheap conf experiment — ❌ TRIED 2026-06-02, did NOT help.** Set `d3d9.forceSamplerTypeSpecConstants = True`
-   via `DXVK_CONFIG` (confirmed read: `Found config env … = True` in the d3d9 log). Still **218 pipeline-compile
-   failures**, and `game-stderr.log` still showed 2048 `depth2d<float> … [[texture(0)]]` duplicate-slot
-   declarations. That option resolves sampler *type* (2D/cube/volume), not the color-vs-depth-compare
-   duplication — so it is no substitute for the source patch. Reverted.
-2. **Rebase + rebuild — ⚠️ THREE walls cleared, blocked on a fourth (a Rosetta-level deadlock).** Cloned
-   DXVK `v2.5.3`, hand-ported the patch to 2.5.3's structure, rebuilt the d3d9 target. In order:
-   - **Shadow-sampler port ✓** — `0` pipeline-compile failures (was 150/218). The black-screen cause is
-     fixed: aliasing depth→color + software shadow-compare ports cleanly to 2.5.3's `dxso_compiler.cpp`.
-     (`pushConstSize` not needed — 2.5.3 uses `sizeof(D3D9RenderStateInfo)`; one mingw-14 guard in
-     `d3d9_include.h` was needed to compile.)
-   - **geometryShader / shaderCullDistance gating ✓ (#61)** — without it these are requested `1` →
-     `Failed to create device`. Ported the `= supported…` gating in `d3d9_device.cpp`. *(Lesson: the stock
-     stash already had this gating, which is why it created a device — don't infer "2.5.3 needs no gating".)*
-   - **robustBufferAccess2 gating ✓** — DXVK 2.x's `dxvk_adapter.cpp` *unconditionally* requires
-     `robustBufferAccess2` ("we use the robustness alignment info in a number of places"), which Apple/MoltenVK
-     doesn't expose → `VK_ERROR_FEATURE_NOT_PRESENT` (and *racily* a hang instead of a clean error). Gated it
-     `= supported`. (MoltenVK already provides the other two Robustness2 flags: `nullDescriptor` via
-     `null-descriptor-fallback.patch`, and `robustImageAccess2`.) EXPERIMENTAL — DXVK 2.x assumes v2 robustness
-     alignment, so a real fix may need MoltenVK to advertise it rather than gating it off.
-   - **`vkCreateDevice` blocked → root cause: robustBufferAccess2.** With all three fixes in, device creation
-     flakily **hung or cleanly failed** right after `Process set as DPI aware`. One run logged it plainly:
-     `VK_ERROR_FEATURE_NOT_PRESENT … VkPhysicalDeviceRobustness2FeaturesKHR` (1st flag). DXVK 2.x's
-     `dxvk_adapter.cpp` **unconditionally requires `robustBufferAccess2`**, which Apple/Metal can't provide
-     (MoltenVK feature request #2447, unimplemented — Metal has no OOB buffer robustness). Requesting an
-     unsupported feature makes MoltenVK *racily* hang or return the error (explains the hang-vs-fail flake).
-
-   **MoltenVK route (2026-06-02): RENDERS, but does NOT fix HDR.** Per the Gcenx "fake the missing feature"
-   method, set `robustBufferAccess2 = true` in our MoltenVK patch (`MVKDevice.mm`) + rebuilt MoltenVK. DXVK
-   2.5.3 then **creates a device and renders `c1m1_hotel`** (survivors + HUD — confirmed by screenshot). But:
-   - **HDR is still OFF** — flat/overexposed, no shadows, *visually identical to 1.10.3*; no `HDR Enabled`, no
-     `A16B16G16R16F` activity.
-   - **Heavy stutter ≈ 1800 `0x010c` GPU faults** — exactly the author's documented consequence of faking
-     `robustBufferAccess2` (DXVK assumes buffer bounds-checking Metal doesn't do → per-frame OOB faults).
-     Reverted MoltenVK to the stable `robustBufferAccess2=false` build.
-
-   ### 🔑 CONCLUSION — DXVK is NOT the HDR lever (A1 hypothesis disproven)
-   Two very different DXVK versions — 1.10.3 **and** a fully-patched, rendering 2.5.3 — **both render HDR-off,
-   flat, no shadows.** So HDR/shadows is **not a DXVK-version problem**; A1's premise ("2.5.3 surfaces the FP16
-   blendable RT → HDR turns on") is **wrong**. The game is **DX8-effective** (baseline commit = *"working
-   dx8"*); HDR + proper shading need real **DX9.5**, and the engine isn't getting there regardless of DXVK or
-   of the config-level `dxlevel 95` forcing. **Next:** pivot to *why the engine stays DX8-level* — engine /
-   `dxsupport` / `mat_dxlevel` + Source's HDR/shader-model detection (deeper than [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8)). The DXVK swap is a closed branch.
-
-   Work preserved (for any future DXVK-2.x effort): `dxvk-build/shadow-sampler-workaround-2.5.3.patch`
-   (**4 real fixes**), built DLL `dxvk-build/dxvk_d3d9.dll.253-patched`, faked MoltenVK
-   `moltenvk-build/libMoltenVK.dylib.rba2true`. Stable deployed: 1.10.3 + `libMoltenVK.dylib.stable-rba2false`.
-
-**Fallback (now strongly recommended — 2.5.3 cleared two walls but hit a `vkCreateDevice` deadlock):** stay
-on the known-good 1.10.3 and write a **targeted DXVK patch** to advertise `D3DFMT_A16B16G16R16F` as a
-blendable RT in `CheckDeviceFormat` — solve the exact cap Source checks, without the whole-version jump and
-its 2.x↔MoltenVK breakage (pipeline-library gaps + the device-creation deadlock).
+### A1. Swap to DXVK 2.5.3 and confirm the HDR format — SUPERSEDED
+> **MOOT / SUPERSEDED 2026-06-03.** This entire subsection chased the **debunked** premise that HDR was off
+> because DXVK 1.10.3 didn't surface the FP16 blendable RT, so swapping to DXVK 2.5.3 (or patching
+> `CheckDeviceFormat`) would "turn HDR on." **DXVK was never the HDR lever.** The real cause was the
+> launcher's own `+mat_hdr_level 1` arg (see the Phase 1 box above and [03-known-issues #1](03-known-issues.md)),
+> and the actual A1 work had *already concluded* "DXVK is NOT the HDR lever" — that conclusion was correct,
+> only the follow-on ("so pivot to why the engine stays DX8-level") was wrong: the engine was at full DX9.5
+> (`mat_dxlevel 100`) the whole time.
+>
+> **Historical record (do not delete — it was genuinely explored and ruled out):** A 2.5.3 swap was tried over
+> 2026-06-02. The stock stash black-screened (missing our shadow-sampler patch); a hand-ported, rebuilt 2.5.3
+> cleared the pipeline-compile failures and `#61` device-creation gating, but DXVK 2.x **unconditionally requires
+> `robustBufferAccess2`** (which Metal/MoltenVK can't provide), causing a flaky `vkCreateDevice` hang/fail. Faking
+> that feature in MoltenVK made 2.5.3 **render** `c1m1_hotel` — but **visually identical to 1.10.3 (HDR still off)**
+> and with ~1800 per-frame `0x010c` faults. Conclusion at the time: two very different DXVK builds both rendered
+> HDR-off → **DXVK is not the HDR variable.** (Now fully explained: both inherited the bad `+mat_hdr_level 1` arg.)
+> Work preserved for any future DXVK-2.x *allocator* effort: `dxvk-build/shadow-sampler-workaround-2.5.3.patch`,
+> built `dxvk-build/dxvk_d3d9.dll.253-patched`, faked `moltenvk-build/libMoltenVK.dylib.rba2true`. Stable deployed:
+> 1.10.3 + `libMoltenVK.dylib.stable-rba2false`.
+>
+> The "next moves" once listed here — `forceSamplerTypeSpecConstants`, rebasing/rebuilding 2.5.3, faking MoltenVK
+> `robustBufferAccess2`, and the fallback "targeted `CheckDeviceFormat` patch to advertise `A16B16G16R16F`" — are
+> **all moot for HDR**. None of them was the lever; the fix was removing one launch arg.
 
 ### A2. Re-assert DX9.5 everywhere (and make it durable — fixes issue #8)
+> **Note 2026-06-03:** DX9.5 is **confirmed already in effect** (`mat_dxlevel 100`, read via VScript probe) — it
+> was never the HDR gate (HDR was pinned off by `+mat_hdr_level 1`, since fixed; see Phase 1 box). A2 remains a
+> valid **durability** task: keep the max-settings/`dxlevel 95` block from being silently reverted by a Steam
+> "verify integrity"/update. It is **not** an HDR-enablement task.
 - `bin/dxsupport.cfg` block `"0"`: `maxdxlevel 98` / `dxlevel 95` (already applied).
 - `left4dead2/dxsupport_override.cfg` block `"3"`: `vendorid 0x106b` → `dxlevel 95 / maxdxlevel 98`.
-- `video.txt`: add `setting.dxlevel 95` — **✅ done via [C2](#c2-single-source-of-truth-for-settings)**
+- `video.txt`: add `setting.dxlevel 95` — **done via [C2](#c2-single-source-of-truth-for-settings)**
   (`assert_max_settings` asserts it every launch). (`maxdxlevel`/`mindxlevel` are `dxsupport.cfg` keys, not
   VideoConfig settings, so they don't belong in `video.txt`.)
-- **Launcher re-asserts on every launch** so a Steam "verify integrity"/update can't silently revert HDR.
-  **Partly done:** C2 re-asserts `video.txt` (incl. `dxlevel 95`); the two `dxsupport*.cfg` files still need
-  the same treatment, joined to the existing bridge-DLL/binary-patch re-apply step.
+- **Launcher re-asserts on every launch** so a Steam "verify integrity"/update can't silently revert the
+  max-settings/`dxlevel 95` block. **Partly done:** C2 re-asserts `video.txt` (incl. `dxlevel 95`); the two
+  `dxsupport*.cfg` files still need the same treatment, joined to the existing bridge-DLL/binary-patch re-apply step.
 
 ### A3. Tonemapping without the M4 AGX auto-exposure crash
-The one HDR feature that faults M4 AGX is **auto-exposure** (`mat_dynamic_tonemapping`), which drives a
-per-frame GPU occlusion-query luminance histogram. Adopt the proven `listenserver.playable.bak` recipe:
-**HDR fully ON, `mat_dynamic_tonemapping 0` (fixed exposure)** with a sane `mat_force_tonemap_scale`.
-Interiors read dark from HDR lightmaps + fixed exposure; full adaptive exposure is the A5 stretch goal.
+> **Update 2026-06-03:** HDR is now fully ON by default (the `+mat_hdr_level 1` arg that forced fullbright is
+> gone), so this is **no longer about enabling HDR** — only about exposure quality. The exposure/tonemap
+> convars (`mat_dynamic_tonemapping`, `mat_force_tonemap_scale`) were **never** the cause of the flat look;
+> they simply had nothing to tonemap while the level rendered fullbright.
 
-### A4. Verify at MAX settings
-User confirms the *visual* (the diag harness reads the `HDR Enabled` log line + fault/fps, but
-**cannot** judge tonemapping). Confirm `0x010c` does not return with HDR-on + 4× MSAA + multicore.
+The one HDR feature that faults M4 AGX is **auto-exposure** (`mat_dynamic_tonemapping`), which drives a
+per-frame GPU occlusion-query luminance histogram. If adaptive exposure proves unstable on M4 AGX, the
+`listenserver.playable.bak` recipe — **`mat_dynamic_tonemapping 0` (fixed exposure)** with a sane
+`mat_force_tonemap_scale` — is a fallback; full adaptive exposure is the A5 stretch goal (`#68`).
+
+### A4. Verify HDR *rendering* at MAX settings — DONE 2026-06-03 (rendering only)
+Verified (rendering): VScript probe reads `mat_hdr_level=2` and `mat_dxlevel=100`; `Level unlit`/forced
+`mat_fullbright` absent from `console.log`; user confirmed the visual — HDR **renders** correctly **with HDR-on
++ 4× MSAA + multicore all active**. **Playability is separate and NOT verified:** subsequent active-play
+testing shows HDR-on re-triggers the `0x010c` device-lost ~30 s into the first full-scene frame (issue #2 /
+[A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker)) — the earlier "stayed up over a
+78-second run" read covered the rendering/probe window, not sustained active play. (Note: the diag harness's
+`HDR Enabled` grep is
+*not* the authoritative read — the VScript probe and the absence of `Level unlit` are; the harness still
+**cannot** judge tonemapping, so the user remains the visual authority.)
 
 ### A5. Stretch quality (not blockers)
 - `#68` — reimplement D3D9 occlusion queries in DXVK → true auto-exposure at full speed.
-- `#3` — force a Store (non-memoryless) store-action on the flashlight depth target so the flashlight
-  casts shadows again (remove the `+r_flashlightdepthtexture 0` stopgap).
+- ~~`#3` — remove the `+r_flashlightdepthtexture 0` stopgap so the flashlight casts shadows again.~~
+  **DONE 2026-06-03** — `DEFAULT_GAME_ARGS` now passes `+r_flashlightdepthtexture 1` (dynamic flashlight
+  shadows on via the same queued-arg mechanism, confirmed working by the user). No memoryless-store-action
+  patch was needed.
 
 ## Settings hardening (max-settings guarantee — part of Phase 1)
 
 ### C1. Neutralise the multicore landmine (MUST-FIX)
-**✅ DONE (2026-06-02).** `play-l4d2.sh`'s `--wined3d` path used to rewrite `video.txt` `mat_queue_mode → 0`
+**DONE (2026-06-02).** `play-l4d2.sh`'s `--wined3d` path used to rewrite `video.txt` `mat_queue_mode → 0`
 **and** write a **persistent `autoexec.cfg`** containing `mat_queue_mode 0`, which the engine then exec'd on
 **every** launch (including the DXVK path) — silently killing multicore. Implemented:
 - The `--wined3d` path **no longer writes `autoexec.cfg`**; serialisation is scoped to that run only — the
@@ -154,14 +164,16 @@ User confirms the *visual* (the diag harness reads the `HDR Enabled` log line + 
   **removes any stale `mat_queue_mode 0` `autoexec.cfg`** — so even a hard-killed `--wined3d` run self-heals.
 
 ### C2. Single source of truth for settings
-**✅ DONE (2026-06-02).** `assert_max_settings` idempotently asserts the VideoConfig half of the
+**DONE (2026-06-02).** `assert_max_settings` idempotently asserts the VideoConfig half of the
 max-settings block into `video.txt` on every launch — `gpu_level 3`, `mat_antialias 4` (4× MSAA),
 `mat_forceaniso 16`, `mat_queue_mode -1`, **`dxlevel 95`** — and snapshots the original to
 `video.txt.orig-pre-launcher`. The ConVar-only settings (picmip 0, expensive water, RTT shadows) ride in
-`DEFAULT_GAME_ARGS`, which agrees with this block. The stale launcher comments (lines ~74–93) are rewritten:
-the debunked `mat_hdr_level 1→2` theory and the "MSAA off / queue 0 was the verified-clean set" claim are
-gone, replaced with the truth (`mat_hdr_level` is a no-op in this retail build; HDR is decided by hardware
-caps).
+`DEFAULT_GAME_ARGS`, which agrees with this block. The stale launcher comments and the old "MSAA off / queue 0
+was the verified-clean set" claim are gone. **Correction 2026-06-03:** an earlier rewrite called `mat_hdr_level`
+"a no-op in this retail build" — that was *wrong*. The engine logs `Unknown command` but **queues** the convar
+and applies it at material-system init, so `+mat_hdr_level 1` actively **pinned HDR off**. Both `+mat_hdr_level`
+tokens have since been **removed** from `DEFAULT_GAME_ARGS`, letting the hardware default (level 2, full HDR)
+stand — see Phase 1 box and [03-known-issues #1](03-known-issues.md).
 > Note: asserting `dxlevel 95` in `video.txt` also lands the **`video.txt` portion of [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8)** early. A2's remaining scope is making the `dxsupport.cfg` / `dxsupport_override.cfg` edits equally durable across a Steam file-verify.
 
 ### C3. Verify max survives HDR-on + online mode
@@ -268,10 +280,15 @@ launch. Document exact prereqs (Xcode CLT, `brew install meson ninja glslang`, m
 ---
 
 ## Risks / unknowns (call these out loud)
-- **HDR via DXVK 2.5.3 is the leading hypothesis but untested**; 2.5.3 needs MAB-off + gating and may
-  reintroduce `0x010c` or trade against HDR. Phase 1's A1 targeted-patch fallback exists.
+- ~~**HDR via DXVK 2.5.3 is the leading hypothesis but untested.**~~ **RESOLVED 2026-06-03 (for rendering)** —
+  DXVK was never the HDR lever; HDR was pinned off by the launcher's own `+mat_hdr_level 1` arg, now removed.
+  HDR *rendering* is no longer a risk.
+- **`0x010c` device-lost under HDR (NEW, OPEN)** — enabling HDR re-triggers the `0x010c` ~30 s into play
+  (issue #2 / [A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker)); the next attempt
+  (a pooled-scratch RT spill in MoltenVK) is slow and **uncertain**. This is the live Phase 1 risk now.
 - **Online mode (firing 101) historically hangs** — Phase 2 is real engineering, the highest-risk part of
   this roadmap, not a setting.
 - **VAC risk** on secured official servers under Wine — must be flagged before connecting.
-- **Memory/docs conflict** ("HDR worked" in an earlier note vs. `HDR Disabled` in git/docs) — resolved in
-  favour of git/docs; memory corrected 2026-06-02.
+- ~~**Memory/docs conflict** ("HDR worked" in an earlier note vs. `HDR Disabled` in git/docs).~~ Moot as of
+  2026-06-03: HDR genuinely **renders** now (`mat_hdr_level 2`), so the "HDR renders" position is the correct
+  one — with the caveat that HDR-on isn't yet *playable* (the `0x010c`, issue #2 / A0).

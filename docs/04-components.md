@@ -14,7 +14,7 @@ Real Steam identity/auth (SteamID, persona, auth tickets) is read **live from th
 Steam client** — nothing about the account is hardcoded, which is what makes "plug in the real
 Steam values from this Mac's Steam app" work on any machine.
 
-> ⚠️ **Portability blocker:** the dylib *path* **is** hardcoded — `steam_helper.c:33`
+> **Portability blocker:** the dylib *path* **is** hardcoded — `steam_helper.c:33`
 > `DYLIB_PATH "/Users/samdotson/Library/.../Left 4 Dead 2/bin/libsteam_api.dylib"`. To port to
 > another Mac this must be resolved dynamically. See [issue #10](03-known-issues.md#10-portability-blockers-per-machine-hardcoding--69-70--porting-goal)
 > / [plan D1](08-roadmap.md#d1-de-hardcode-the-steam-dylib-path-must-fix).
@@ -62,7 +62,7 @@ D3D9 → Vulkan. Built from **DXVK v1.10.3** + `shadow-sampler-workaround.patch`
 |---|---|
 | `dxvk_d3d9.dll` | **Active** build (v1.10.3+), deployed to the game's `bin/` (sha matches) |
 | `dxvk_d3d9.dll.1103-backup` | Identical 1.10.3 recovery copy |
-| `dxvk_d3d9.dll.253-stash` | **DXVK 2.5.3** build, **not deployed** — kept for the HDR / 32-bit-allocator investigation |
+| `dxvk_d3d9.dll.253-stash` | **DXVK 2.5.3** build, **not deployed** — kept for the (now-closed) 32-bit-allocator / HDR investigation; see note below |
 | `dxvk_d3d9.dll.hdrlog-orig` | 1.10.3 checkpoint before HDR-logging instrumentation |
 | `shadow-sampler-workaround.patch` | The DXVK patch (below) |
 
@@ -74,7 +74,9 @@ D3D9 → Vulkan. Built from **DXVK v1.10.3** + `shadow-sampler-workaround.patch`
 5. **pushConstSize bug fix** — stock DXVK assigned the push-constant *size* from the *offset* (copy-paste bug) → too-small range → shader reads past it → Metal device fault every frame.
 6. **Shadow-sampler aliasing** — alias depth-compare sampler to the color sampler (software compare) so the VertexLitGeneric shadow shaders compile on MoltenVK.
 
-> A 2.5.3 build exists because DXVK 2.5.3's modern memory allocator addressed 32-bit address-space exhaustion at load (`#57`/`#60`); it needed MAB-off + feature gating to create a device on MoltenVK (`#61`). It is currently **stashed**, not deployed — and is the prime candidate to test for the HDR issue.
+> A 2.5.3 build exists because DXVK 2.5.3's modern memory allocator addressed 32-bit address-space exhaustion at load (`#57`/`#60`); it needed MAB-off + feature gating to create a device on MoltenVK (`#61`). It is currently **stashed**, not deployed.
+>
+> **SUPERSEDED 2026-06-03:** this build was once "the prime candidate to test for the HDR issue." DXVK was *never* the HDR lever — the real cause was the launcher's own `+mat_hdr_level 1` launch arg, which pinned HDR to LDR every boot (see [03-known-issues #1](03-known-issues.md)). A patched 2.5.3 was confirmed to render identically to 1.10.3, and DXVK already returns `A16B16G16R16F` as a renderable+blendable HDR RT at init (verified with an instrumented `CheckDeviceFormat` probe, `result=0`/D3D_OK). The 2.5.3 build remains stashed only for the 32-bit-allocator angle, not for HDR.
 
 ---
 
@@ -107,4 +109,4 @@ Vulkan → Metal. Built from **MoltenVK v1.4.1** + `null-descriptor-fallback.pat
 - `dxvk.conf` (game root **and** `bin/`) — DXVK searches the CWD, so the root copy is the effective one. Minimal by design; the real Apple-Silicon fixes are compiled into the DLL.
 - `steam_appid.txt` = `550` (L4D2) for the DRM check.
 - `cfg/video.txt` — resolution + graphics settings (see [01-current-state.md](01-current-state.md#videotxt-left4dead2cfgvideotxt)). The launcher's `assert_max_settings` idempotently re-asserts the max-settings block here on **every** launch — `gpu_level 3`, `mat_antialias 4` (4× MSAA), `mat_forceaniso 16`, `mat_queue_mode -1` (multicore), `dxlevel 95` — backing the original up once to `video.txt.orig-pre-launcher`. It also strips any stale `cfg/autoexec.cfg` a `--wined3d` run left behind (the multicore landmine).
-- `bin/dxsupport.cfg` + `left4dead2/dxsupport_override.cfg` — GPU→dxlevel database, edited to force DX9.5 for the M4 Pro (HDR investigation). `dxlevel 95` is now also asserted directly in `video.txt` by the launcher (see above); making *these two files'* edits equally durable across a Steam file-verify is [Phase 1 / A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).
+- `bin/dxsupport.cfg` + `left4dead2/dxsupport_override.cfg` — GPU→dxlevel database, edited to force DX9.5 for the M4 Pro. `dxlevel 95` is now also asserted directly in `video.txt` by the launcher (see above); making *these two files'* edits equally durable across a Steam file-verify is [Phase 1 / A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8). The engine in fact reads `mat_dxlevel 100` (full DX9.5) at runtime. (Historical note: these edits were originally part of an "HDR investigation"; HDR was *not* gated by dxlevel — it was pinned off by the launcher's own `+mat_hdr_level 1` arg, since fixed — see [03-known-issues #1](03-known-issues.md).)

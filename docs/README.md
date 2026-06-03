@@ -1,5 +1,5 @@
 <!--
-  ⚠️ This README is kept BYTE-IDENTICAL in two places:
+  This README is kept BYTE-IDENTICAL in two places:
      • /README.md            (the GitHub front page)
      • /docs/README.md       (the documentation index)
   Edit BOTH together, every time. Internal links are absolute GitHub URLs so the
@@ -10,8 +10,8 @@
 # L4D2 wrapper for Apple Silicon macOS 26
 
 Runs **Left 4 Dead 2** (the 32-bit Windows build) on Apple Silicon, signed in to your real Steam
-account. **Single-player is playable today.** Proper **HDR/DX9 shading**, **online multiplayer**, and
-**portability to any Apple Silicon Mac** are the active work — see the **[Roadmap](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md)**.
+account. **Single-player is playable today; HDR rendering now works**, though HDR-on is **not yet playable** (it trips a GPU device-lost fault — see [issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). **Online multiplayer** and
+**portability to any Apple Silicon Mac** are the remaining active work — see the **[Roadmap](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md)**.
 
 Left 4 Dead 2's native macOS build is 32-bit (i386). macOS dropped 32-bit support at Catalina, and
 Rosetta 2 only translates 64-bit x86 — so the Mac binaries are dead and Valve isn't updating them.
@@ -21,18 +21,18 @@ turnkey installer.
 
 ## Status at a glance
 
-Current baseline: `git HEAD 8cdc8ca` — *"working dx8 no tonemapping no multiplayer"*.
+Current baseline: `git HEAD 8cdc8ca` + the **2026-06-03 HDR fix** (HDR now **renders**, but isn't yet **playable** — see the HDR row; the *"working dx8 no tonemapping"* HEAD label predates the fix).
 
 | Aspect | State |
 |---|---|
-| Launches to main menu | ✅ Working |
-| Loads into a campaign (renders, HUD, weapons, bots) | ✅ Working (single-player) |
-| Framerate (native res, max settings) | ✅ ~90–130 fps on the test map |
-| Max settings (4× MSAA + multicore + max textures) | ✅ On — the launcher re-asserts the full max-settings block in `video.txt` every launch (C2) |
-| **HDR / tonemapping + DX9 shading** | ❌ **OFF** — engine reports `HDR Disabled`; flat/overexposed lighting → [Phase 1](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
-| Flashlight shadow | 🟡 Disabled as a stopgap (`r_flashlightdepthtexture 0`) |
-| **Online / multiplayer** | ❌ **Not working** — bridge plumbing present, but the engine is never put into Steam "online mode" → [Phase 2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
-| **Portability (any Apple Silicon Mac)** | 🟡 Goal — close, but a hardcoded dylib path + resolution block it → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
+| Launches to main menu | Working |
+| Loads into a campaign (renders, HUD, weapons, bots) | Working (single-player) |
+| Framerate (native res, max settings) | ~90–130 fps on the test map |
+| Max settings (4× MSAA + multicore + max textures) | On — the launcher re-asserts the full max-settings block in `video.txt` every launch (C2) |
+| **HDR / tonemapping + DX9 shading** | **Renders, not yet playable** — rendering fixed 2026-06-03 (was our own `+mat_hdr_level 1` pin; removed → engine default = full HDR, at DX9.5 `mat_dxlevel 100`), but HDR-on freezes ~30 s into play via the `0x010c` device-lost ([issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)) |
+| Flashlight shadow | On (`r_flashlightdepthtexture 1`) — dynamic shadows render |
+| **Online / multiplayer** | **Not working** — bridge plumbing present, but the engine is never put into Steam "online mode" → [Phase 2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
+| **Portability (any Apple Silicon Mac)** | Goal — close, but a hardcoded dylib path + resolution block it → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
 
 ## The stack
 
@@ -264,12 +264,17 @@ WINED3D_RENDERER=gl               # with --wined3d: force GL backend
 
 Full list with cause/workaround/status: [03 — Known issues](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md). The big ones:
 
-- **HDR / DX9 shading is off.** The engine renders flat, overexposed LDR lighting with no real shadows
-  (interiors as bright as exteriors) — the game is **DX8-effective**. **DXVK ruled out (2026-06-02):** a fully
-  patched + rebuilt DXVK **2.5.3** was made to render on MoltenVK and shows the *same* flat, HDR-off lighting
-  as 1.10.3 — so HDR is **not** a DXVK FP16-format problem. The real lever is getting the engine to actually
-  run **DX9.5** shading (engine / dxsupport / dxlevel + Source's HDR detection). This is **Phase 1**; see
-  [roadmap A1](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) for the full play-by-play.
+- **HDR rendering — SOLVED; HDR playability — BLOCKED (2026-06-03).** The flat, over-bright, no-shadow
+  lighting was caused by the launcher's own `+mat_hdr_level 1` token: the engine logs it as `Unknown command`
+  but **queues and applies** it at material-system init, pinning HDR to LDR+bloom. L4D2's maps are HDR-only, so
+  that read the empty LDR lighting lump → `Level unlit` → fullbright. **Removing the token** lets the engine
+  default (full HDR, level 2) stand — `mat_hdr_level` reads 2, the engine is at DX9.5 (`mat_dxlevel 100`), and
+  maps light correctly at max settings. **But turning HDR on re-triggers the `0x010c` device-lost** (issue #2)
+  ~30 s into play — the FP16 HDR render targets tip the marginal M4 AGX threshold → freeze. So HDR **renders**
+  but isn't yet **playable**; the `0x010c`-under-HDR is now the **top remaining blocker**. DXVK version,
+  DX8/dxlevel, MSAA, and multicore were all confirmed **red herrings**. Details:
+  [issue #1](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md) ·
+  [issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md).
 - **Online multiplayer doesn't work yet.** The bridge proxies lobbies, P2P, the server browser, and auth to
   real Mac Steam, but the engine is never put into Steam "online mode" (`SteamServersConnected_t` is
   blacklisted because firing it currently hangs). This is **Phase 2**.
