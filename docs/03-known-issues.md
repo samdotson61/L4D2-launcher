@@ -140,7 +140,7 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
 
 ## 10. Portability blockers (per-machine hardcoding) (`#69`, `#70` — porting goal)
 
-**Goal.** Port this wrapper to **any Apple Silicon Mac** and play L4D2 + join official Steam multiplayer by plugging in the real Steam values from that Mac's Steam app. See [Phase 3](08-roadmap.md#phase-3--portability-to-any-apple-silicon-mac).
+**Goal.** Port this wrapper to **any Apple Silicon Mac** and play L4D2 + join official Steam multiplayer by plugging in the real Steam values from that Mac's Steam app. See [Phase 2](08-roadmap.md#phase-2--portability-to-any-apple-silicon-mac).
 
 **Blockers found — both RESOLVED 2026-06-04:**
 - ~~**Hardcoded Steam dylib path.**~~ **RESOLVED.** `bridge/steam_helper.c` no longer hardcodes the path;
@@ -159,7 +159,7 @@ persona / auth live from the running Mac Steam client** — no hardcoded SteamID
 the script's location instead of a hardcoded path (D4), and **confirms the Apple GPU vendor `0x106b`** (D5).
 `vendorid 0x106b` + MoltenVK `isAppleGPU` (Apple1–10) cover M1–M4+. The only host requirements are Steam
 installed + logged in + owning L4D2 (appid 550). **All six D-items (D1–D6) are now code-complete; the only
-Phase 3 remainder is validation, not code:** a clean-Mac `build-deps.sh` run (D4) and a non-M4 Apple Silicon
+Phase 2 remainder is validation, not code:** a clean-Mac `build-deps.sh` run (D4) and a non-M4 Apple Silicon
 test (D5). ([D3](08-roadmap.md#d3-plug-in-real-steam-values))
 
 ---

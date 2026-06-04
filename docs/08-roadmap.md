@@ -219,69 +219,17 @@ stand — see Phase 1 box and [03-known-issues #1](03-known-issues.md).
 ### C3. Verify max survives HDR-on + online mode
 **Max + HDR-on: confirmed (2026-06-04).** The `0x010c` crash stays away at max settings with HDR on — the
 attachment-less-skip fix ([A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04)) holds across a
-level-1→2 playthrough and repeated 150 s runs (0 faults). **Still open (rolls into Phase 2):** re-confirm this
+level-1→2 playthrough and repeated 150 s runs (0 faults). **Still open (rolls into Phase 3):** re-confirm this
 once the engine is in **online mode**, and handle the `FCVAR_CHEAT` gating of auto-exposure in online play
 (`#67`) if/when A5 lands.
 
 ---
 
-# Phase 2 — Online multiplayer: join official Steam games
+# Phase 2 — Portability to any Apple Silicon Mac
 
-**Milestone:** first end-to-end proof = listen-server + friend-join; then join official servers via the
-browser/lobby. (Issues #6, #7.)
-
-**Good news:** L4D2 asks for the **legacy** interfaces (`SteamUser021`, `SteamFriends017`,
-`SteamMatchMaking009`, `SteamMatchMakingServers002`, `SteamNetworking006`) — classic Steam P2P, **not**
-the modern SDR/NetworkingSockets stack. The bridge **already** proxies all of them to the real Mac Steam
-client: lobby browse/create/join, lobby data/members/owner/game-server, P2P send/read/session, the server
-browser, auth tickets, and **synthetic host-side validation** (`ValidateAuthTicketResponse_t` +
-`GSClientApprove_t`).
-
-**The real blocker:** the bridge **blacklists** `SteamServersConnected_t` (id 101) because firing it flips
-the engine into "Steam online mode," after which the engine **blocks on follow-on state the bridge
-doesn't yet deliver** (permanent loading screen). Single-player survives *because* we suppress online
-mode. **Online MP requires online mode** — so Phase 2 is genuine R&D, not a config flip, and the
-highest-risk phase.
-
-### B1. Map the online-mode dependency chain
-With a debug helper, **fire 101 after the main menu is reached** and capture exactly what the engine then
-polls/waits on. Expected dependents: `BLoggedOn() == true`, connected universe (`ISteamUtils`),
-`GetAuthSessionTicketResponse_t` (id 163, already drained), `SteamServerConnectFailure_t` /
-`SteamServersDisconnected_t` handling, and `PersonaStateChange_t` (id 304) where the engine walks a
-friends list we don't populate.
-
-### B2. Replace "blacklist to survive" with "populate real data"
-- Un-blacklist **101**, but **gate it until after the menu** (avoid the early-init hang).
-- **Populate the friends list** from real Mac Steam via the helper so the **304** handler succeeds.
-- Return real `BLoggedOn`/connected-universe so the post-101 state machine completes.
-- Deliver lobby callbacks at the right time — `LobbyEnter_t`, `LobbyChatUpdate_t`, `LobbyGameCreated_t`
-  — the likely cause of issue #6's loading↔menu flicker.
-
-### B3. Server browser → join an official dedicated server
-Verify `RequestInternetServerList` actually forwards real server rows into the game's
-`ISteamMatchmakingServersResponse` (the helper currently has a **no-op** `ServerResponded` vtable — wire
-it to deliver real results). Then test `connect <ip>` to an official server.
-
-### B4. Lobby / friends "Join Game"
-Test the Steam-overlay/friends **Join Game** flow and the in-game lobby browser (`RequestLobbyList` →
-`JoinLobby` → P2P to host). The pack(4)→pack(8) callback repack and the matchmaking callback gate are
-already in place; verify timing end-to-end.
-
-### B5. Auth / VAC reality check (flag to user before connecting)
-The bridge uses the host's **real** auth ticket and **real SteamID** from the Mac Steam client, so the
-player authenticates as their genuine account. **However, running under Wine + a custom `steam_api.dll`
-on a VAC-secured official server carries a real (if small) VAC-ban risk.** Plan: do first end-to-end MP on
-**listen-server + friend-join** and **non-VAC/community** servers; **get explicit user sign-off before
-joining secured Valve official servers.**
-
-### B6. Listen-server hosting (most controllable first proof)
-Host-side synthetic `GSClientApprove` already exists. Verify a friend can join a locally hosted game
-(NAT-punched P2P via real Steam). This is the lowest-risk end-to-end multiplayer test and should be the
-**first** MP milestone.
-
----
-
-# Phase 3 — Portability to any Apple Silicon Mac
+> **Status: CODE-COMPLETE (2026-06-04) — only hardware validation remains.** All six per-machine items
+> (D1–D6) are implemented; the only open work is a clean-Mac `build-deps.sh` run (D4) and a non-M4 Apple
+> Silicon test (D5), both of which need different hardware.
 
 **Milestone:** a clean checkout + `./play-l4d2.sh` on a *different* Apple Silicon Mac builds, detects that
 Mac's Steam + resolution, and launches into online-capable, properly-shaded, max-settings L4D2. (Issue #10.)
@@ -327,7 +275,7 @@ M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` file
 > `L4D2_STEAM_DYLIB`; the Steam dir is overridable via `L4D2_MAC_STEAM_DIR`. (Steam itself decides the active
 > *account*, so there's no account-override knob — the preflight surfaces it for confirmation instead.)
 > Verified live: reads the real persona + login + SteamID. This is also the **Mac-Steam identity hook that
-> Phase 2 online mode leans on** — confirming the live account is exactly what reliable online play needs.
+> Phase 3 online mode leans on** — confirming the live account is exactly what reliable online play needs.
 
 ### D4. Path / case / reproducibility hygiene
 > **DONE 2026-06-04 (code + case caveat; clean-Mac build verify still pending).** `LAUNCHER_DIR` is no longer
@@ -360,6 +308,88 @@ M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` file
 
 ---
 
+# Phase 3 — Online multiplayer: join official Steam games
+
+> **Status: NOT STARTED — the current frontier and the highest-risk phase.** Phases 1 (shading) and 2
+> (portability) are complete; online multiplayer is the one remaining capability and the active work.
+
+**Milestone:** first end-to-end proof = listen-server + friend-join; then join official servers via the
+browser/lobby. (Issues #6, #7.)
+
+**Good news:** L4D2 asks for the **legacy** interfaces (`SteamUser021`, `SteamFriends017`,
+`SteamMatchMaking009`, `SteamMatchMakingServers002`, `SteamNetworking006`) — classic Steam P2P, **not**
+the modern SDR/NetworkingSockets stack. The bridge **already** proxies all of them to the real Mac Steam
+client: lobby browse/create/join, lobby data/members/owner/game-server, P2P send/read/session, the server
+browser, auth tickets, and **synthetic host-side validation** (`ValidateAuthTicketResponse_t` +
+`GSClientApprove_t`).
+
+**The real blocker:** the bridge **blacklists** `SteamServersConnected_t` (id 101) because firing it flips
+the engine into "Steam online mode," after which the engine **blocks on follow-on state the bridge
+doesn't yet deliver** (permanent loading screen). Single-player survives *because* we suppress online
+mode. **Online MP requires online mode** — so Phase 3 is genuine R&D, not a config flip, and the
+highest-risk phase.
+
+## Implementation steps
+
+Ordered by execution. **B1–B4 are the critical path to the first milestone** (a working listen-server game
+a friend can join); **B5–B6** then extend to joining other people's games; **B7** is a cross-cutting safety
+gate that must be cleared before any VAC-secured server. Each step assumes the previous one is verified,
+except B7, which applies throughout. *(This re-segments the project's earlier online-MP notes into
+execution order: the "fire 101" diagnosis stays first, listen-server hosting moves up to become the first
+milestone, and the VAC check becomes an explicit gate at the end.)*
+
+### B1. Diagnose the online-mode dependency chain
+**Do this first — everything below depends on knowing exactly what firing 101 triggers.** With a debug
+helper, **fire `SteamServersConnected_t` (id 101) after the main menu is reached** and capture exactly what
+the engine then polls/waits on. Expected dependents: `BLoggedOn() == true`, connected universe
+(`ISteamUtils`), `GetAuthSessionTicketResponse_t` (id 163, already drained), `SteamServerConnectFailure_t` /
+`SteamServersDisconnected_t` handling, and `PersonaStateChange_t` (id 304) where the engine walks a friends
+list we don't populate. **Output:** a concrete list of post-101 state the bridge must satisfy in B2–B3.
+
+### B2. Enter online mode without hanging — fire 101 + satisfy the immediate state machine
+Turn B1's diagnosis into a bridge that *survives* online mode instead of suppressing it:
+- Un-blacklist **101**, but **gate it until after the menu** (avoid the early-init hang).
+- Return real `BLoggedOn`/connected-universe so the post-101 state machine completes.
+- **Populate the friends list** from real Mac Steam via the helper so the **304** (`PersonaStateChange_t`)
+  handler succeeds instead of walking an empty list.
+- Handle `SteamServerConnectFailure_t` / `SteamServersDisconnected_t` so a failure path resolves cleanly
+  rather than wedging the loading screen.
+
+**Exit criterion:** the engine reaches an interactive online main menu and stays there (no permanent
+loading screen) with 101 fired.
+
+### B3. Deliver lobby callbacks at the right time
+With online mode stable, complete the lobby state machine: deliver `LobbyEnter_t`, `LobbyChatUpdate_t`, and
+`LobbyGameCreated_t` at the right moments. Mistimed/missing lobby callbacks are the likely cause of issue
+#6's loading↔menu flicker. **Exit criterion:** creating/entering a lobby transitions the UI correctly with
+no flicker.
+
+### B4. First end-to-end proof — listen-server hosting + friend join (FIRST MILESTONE)
+The lowest-risk, most controllable end-to-end multiplayer test, and the **first** MP milestone. Host-side
+synthetic `GSClientApprove` already exists; verify a friend can **join a locally hosted listen-server game**
+(NAT-punched P2P via real Steam). Keep this on **non-VAC/community** footing per B7. **Exit criterion:** a
+friend connects to a game you host and play proceeds.
+
+### B5. Join an official dedicated server via the server browser
+Verify `RequestInternetServerList` actually forwards real server rows into the game's
+`ISteamMatchmakingServersResponse` — the helper currently has a **no-op** `ServerResponded` vtable, so wire
+it to deliver real results. Then test `connect <ip>` to an official server. **Gated by B7** before any
+secured server.
+
+### B6. Join a friend's game — lobby / "Join Game"
+Test the Steam-overlay/friends **Join Game** flow and the in-game lobby browser (`RequestLobbyList` →
+`JoinLobby` → P2P to host). The pack(4)→pack(8) callback repack and the matchmaking callback gate are
+already in place; verify timing end-to-end.
+
+### B7. Auth / VAC safety gate (clear before any secured server — applies throughout)
+**Cross-cutting, not a final step.** The bridge uses the host's **real** auth ticket and **real SteamID**
+from the Mac Steam client, so the player authenticates as their genuine account. **However, running under
+Wine + a custom `steam_api.dll` on a VAC-secured official server carries a real (if small) VAC-ban risk.**
+Plan: do all first-time MP (B4–B6) on **listen-server + friend-join** and **non-VAC/community** servers;
+**get explicit user sign-off before joining secured Valve official servers.**
+
+---
+
 ## Risks / unknowns (call these out loud)
 - ~~**HDR via DXVK 2.5.3 is the leading hypothesis but untested.**~~ **RESOLVED 2026-06-03 (for rendering)** —
   DXVK was never the HDR lever; HDR was pinned off by the launcher's own `+mat_hdr_level 1` arg, now removed.
@@ -369,7 +399,7 @@ M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` file
   a tile-memory overflow as first theorized; patched MoltenVK skips creating an encoder for it (issue #2 /
   [A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04)). HDR is playable end-to-end at max settings.
   No longer a Phase 1 risk.
-- **Online mode (firing 101) historically hangs** — Phase 2 is real engineering, the highest-risk part of
+- **Online mode (firing 101) historically hangs** — Phase 3 is real engineering, the highest-risk part of
   this roadmap, not a setting. **This is now the leading live risk.**
 - **VAC risk** on secured official servers under Wine — must be flagged before connecting.
 - ~~**Memory/docs conflict** ("HDR worked" in an earlier note vs. `HDR Disabled` in git/docs).~~ Moot as of
