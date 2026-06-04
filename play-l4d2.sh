@@ -77,14 +77,20 @@ STEAM_ARGS=(-no-cef-sandbox)
 #   confirmation/stopgap; the real fix is forcing Store (non-memoryless)
 #   store-action on that depth target — tracked separately.
 #
-# Max-settings render args — the ConVar half of the max-settings guarantee.
-#   The VideoConfig half (4× MSAA, multicore, aniso, gpu_level, dxlevel) lives in
-#   video.txt and is re-asserted every launch by assert_max_settings (C2); these
-#   two must agree, and do.  What's actually maxed here: full textures
-#   (mat_picmip 0), expensive water (r_waterforceexpensive 1), render-to-texture
-#   shadows (r_shadowrendertotexture 1), 4× MSAA (mat_antialias 4) and multicore
-#   (mat_queue_mode -1) — at the display's detected logical resolution (D2;
-#   1512×982 on this 14" MBP, auto-detected elsewhere, overridable via L4D2_RES).
+# Default render args — the ConVar half of the FIRST-RUN max-settings DEFAULT.
+#   POLICY: "max settings" is the recommended baseline the launcher SEEDS on first run,
+#   NOT a block re-forced every launch — players may change graphics settings in-game and
+#   they PERSIST (see assert_max_settings / C2, revised 2026-06-04).  The VideoConfig half
+#   (4× MSAA, multicore, aniso, gpu_level, dxlevel, resolution) is seeded into video.txt,
+#   which LATCHES and overrides these launch args, so a player's saved video.txt values
+#   win over +mat_antialias / +mat_queue_mode here (those persist correctly).
+#   What's pinned by these args: 4× MSAA (mat_antialias 4) and multicore (mat_queue_mode
+#   -1) — both inert once video.txt holds them — plus the three ConVar-only quality
+#   settings with NO video.txt key, which therefore stay launcher-defaulted and do not
+#   yet persist: full textures (mat_picmip 0), expensive water (r_waterforceexpensive 1),
+#   render-to-texture shadows (r_shadowrendertotexture 1).  Resolution comes from the
+#   display's detected logical value (D2; 1512×982 on this 14" MBP, overridable via
+#   L4D2_RES) and is seeded to video.txt, where it now persists.
 #
 #   *** HDR "flat / blown-out / no baked shadows": RENDERING SOLVED 2026-06-03 ***
 #   The cause was THIS launcher.  A `+mat_hdr_level 1` token used to live in this
@@ -105,17 +111,16 @@ STEAM_ARGS=(-no-cef-sandbox)
 #   exposure/tonemap convars, the FP16 CheckDeviceFormat report (DXVK already
 #   returns A16B16G16R16F blendable=OK at init).  See docs/03-known-issues.md #1.
 #
-#   NOTE — HDR RENDERS BUT IS NOT YET PLAYABLE.  Turning HDR on (this fix) re-triggers
-#   the 0x010c device-lost GPU fault ~25-40s into active play: the FP16 HDR render
-#   targets exhaust the M4 AGX tile-memory budget at the first full-scene frame →
-#   VK_ERROR_DEVICE_LOST → freeze.  Separate open blocker (docs/03-known-issues.md
-#   #2).  Every historical "playable" build was secretly HDR-OFF.  FORCE_PRIVATE_RT
-#   / L4D2_MVK_RESUME / PREFILL / lower-res all fail; next attempt is a pooled-
-#   scratch RT spill in MoltenVK.  So: HDR _or_ playable, not both, for now.
+#   HDR IS PLAYABLE at max settings (fixed 2026-06-04).  Turning HDR on used to re-trigger
+#   the 0x010c device-lost GPU fault ~25-40s into play; the root cause was an ATTACHMENT-
+#   LESS render pass (a 16384×16384 pass with zero attachments hard-aborts the AGX GPU),
+#   NOT a tile-memory overflow.  Patched MoltenVK skips creating an encoder for it; the
+#   user played levels 1→2 with 0 faults.  See docs/03-known-issues.md #2.
 #
-#   mat_queue_mode -1 keeps multicore ON.  Only the --wined3d path forces it to 0,
-#   and only for that single run (see do_launch_wined3d + _wined3d_restore / C1);
-#   it is never persisted to autoexec.cfg/video.txt any more.
+#   mat_queue_mode -1 is the multicore DEFAULT; a player may change it via video.txt
+#   (which wins) to adapt.  Only the --wined3d path forces it to 0, and only for that
+#   single run (see do_launch_wined3d + _wined3d_restore / C1), restoring the pre-run
+#   value on exit; it is never persisted to autoexec.cfg any more.
 #   +r_flashlightdepthtexture 1: dynamic flashlight shadows ON (same queued-arg
 #   mechanism; confirmed working).  Replaced the old `0` stopgap.
 DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4)
@@ -179,6 +184,11 @@ Usage:
   play-l4d2.sh --bridge            Full bridge pipeline: build, install, start helper
   play-l4d2.sh --steam-check       Verify Mac Steam is running + signed in and show
                                    the account the bridge will authenticate as (D3)
+  play-l4d2.sh --max-settings      Re-apply the recommended MAX graphics baseline to
+                                   video.txt (resolution, 4× MSAA, multicore, 16× aniso,
+                                   gpu_level 3, dxlevel 95). Normally your in-game
+                                   settings changes persist; use this to reset to max
+                                   (e.g. after a Steam "verify integrity" regenerates it).
   play-l4d2.sh --hud               Enable Metal/D3DMetal performance HUD
   play-l4d2.sh --debug             Verbose Wine logging to stderr
   play-l4d2.sh --diag              LIGHT, playable diagnostics → game-stderr.log
@@ -232,6 +242,7 @@ while [[ $# -gt 0 ]]; do
     --install-bridge)     ACTION=install-bridge ;;
     --bridge)             ACTION=bridge ;;
     --steam-check)        ACTION=steam-check ;;
+    --max-settings)       ACTION=max-settings ;;
     --hud)            EXTRA_ENV+=("MTL_HUD_ENABLED=1") ;;
     --debug)          EXTRA_ENV+=("WINEDEBUG=warn+all,fixme-all") ;;
     --diag)
@@ -722,75 +733,120 @@ detect_resolution() {
   return 1
 }
 
-# C2 — single source of truth for graphics settings.  Idempotently re-assert the
-# max-settings VideoConfig block into video.txt on every launch so nothing (a
-# Steam update / "verify integrity", the in-game options menu, or a prior
-# --wined3d run) can silently downgrade it.  video.txt LATCHES at material-system
-# init and overrides config.cfg / autoexec / launch args, so this is THE place the
-# guarantee must live; the ConVar-only settings (picmip / expensive water / RTT
-# shadows) ride in DEFAULT_GAME_ARGS, which agrees with this block.
+# C2 (revised 2026-06-04) — SEED the recommended max-settings DEFAULTS, then leave the
+# player in control.  POLICY CHANGE: "max settings" is now the FIRST-RUN DEFAULT and the
+# recommended target, NOT a block re-forced on every launch.  Players may change any
+# graphics setting in-game (resolution, MSAA, aniso, gpu_level, multicore, dxlevel) and
+# their choice PERSISTS across restarts — essential for adapting to different Macs and
+# displays.  This is what fixes the "saved resolution didn't persist" bug: the old code
+# overwrote defaultres (and the rest of the block) from detect_resolution every launch.
 #
-# Also performs the C1 cleanup: removes any leftover "multicore landmine"
-# autoexec.cfg (mat_queue_mode 0) that a --wined3d run might have stranded.
+#   • FIRST launcher run on this install (no video.txt.orig-pre-launcher snapshot yet)
+#     OR an explicit `--max-settings` (FORCE_MAX=1): WRITE the full max baseline —
+#     establish/restore the recommended defaults, incl. this Mac's detected resolution.
+#   • EVERY later run: SEED-IF-ABSENT only — insert a max default for a key the
+#     engine/player hasn't written yet, but NEVER overwrite a value already present.
+#   • L4D2_RES, when set, stays an explicit per-launch resolution override and wins.
+#
+# video.txt LATCHES at material-system init and overrides config.cfg / autoexec / launch
+# args, so a player's value here beats the (now inert) +mat_antialias / +mat_queue_mode
+# launch args in DEFAULT_GAME_ARGS — those settings persist correctly.  (The ConVar-only
+# quality pins mat_picmip / r_waterforceexpensive / r_shadowrendertotexture have no
+# video.txt key and are still passed every launch; see the DEFAULT_GAME_ARGS note.)
+#
+# Also self-heals a hard-killed --wined3d run: that path leaves a .wined3d-mqm-restore
+# sidecar holding the pre-run mat_queue_mode.  If it's still here, the prior run died
+# before its EXIT trap, so we restore that exact value (preserving the C1 multicore-
+# landmine guarantee WITHOUT clobbering a deliberate player choice) and drop the sidecar.
 assert_max_settings() {
   local vid="$GAME_DIR/left4dead2/cfg/video.txt"
   local autoexec="$GAME_DIR/left4dead2/cfg/autoexec.cfg"
+  local snap="$vid.orig-pre-launcher"
+  local mqm_restore="$GAME_DIR/left4dead2/cfg/.wined3d-mqm-restore"
 
-  if [[ -f "$vid" ]]; then
-    # One-time snapshot of the pre-launcher video.txt (parallels dxsupport.cfg.orig-*).
-    [[ -f "$vid.orig-pre-launcher" ]] || cp "$vid" "$vid.orig-pre-launcher"
-    # VideoConfig keys we guarantee.  dxlevel 95 keeps the engine ≥ DX9 so HDR
-    # isn't silently disabled.
-    #
-    # HDR is ON at full max settings.  The old L4D2_HDR=1 toggle that forced MSAA
-    # off + single-thread "so HDR could survive" is GONE: that MSAA/multicore-
-    # breaks-HDR trade-off was a DEBUNKED RED HERRING.  HDR was never disabled by
-    # MSAA or multicore — it was disabled by a stray +mat_hdr_level 1 launch arg
-    # (removed; see the DEFAULT_GAME_ARGS note).  Full HDR now coexists with 4×
-    # MSAA + multicore — exactly the "most successful build" config.
-    local mode="max settings (4× MSAA · multicore · HDR on)"
-    local -a keys=(gpu_level mat_antialias mat_forceaniso mat_queue_mode dxlevel)
-    local -a vals=(3         4             16             -1             95)
-    # D2 — assert this Mac's detected logical resolution too (no longer hardcoded
-    # to 1512×982).  windowed-borderless (fullscreen 0 / nowindowborder 1) is left
-    # untouched.  On detection failure, leave defaultres as-is rather than guess.
-    local resnote="" res rw rh
+  # Self-heal an interrupted --wined3d run first, so the recovered value then counts as
+  # "already present" for the seed-if-absent pass below.
+  if [[ -f "$mqm_restore" && -f "$vid" ]]; then
+    local prior; prior="$(tr -dc '0-9-' < "$mqm_restore")"; [[ -n "$prior" ]] || prior=-1
+    L4D2_V="$prior" perl -i -pe 's/("setting\.mat_queue_mode"\s+)"-?\d+"/$1"$ENV{L4D2_V}"/' "$vid"
+    rm -f "$mqm_restore"
+    warn "Recovered mat_queue_mode $prior from an interrupted --wined3d run"
+  fi
+
+  if [[ ! -f "$vid" ]]; then
+    warn "video.txt not found ($vid) — skipping settings seed"
+    return 0
+  fi
+
+  # "Have we managed this install before?"  The one-time pre-launcher snapshot is the
+  # marker: absent ⇒ first run.  Test BEFORE creating it.
+  local first_run=0
+  [[ -f "$snap" ]] || first_run=1
+  [[ -f "$snap" ]] || cp "$vid" "$snap"
+
+  # Write the FULL baseline on first run or explicit --max-settings; otherwise only fill
+  # in settings the player hasn't chosen.
+  local seed_all=0
+  [[ "$first_run" == 1 || "${FORCE_MAX:-0}" == 1 ]] && seed_all=1
+
+  # The recommended max baseline.  dxlevel 95 keeps the engine ≥ DX9 so the default has
+  # HDR on; a player may lower it to adapt (HDR then turns off — an accepted tradeoff).
+  local -a keys=(gpu_level mat_antialias mat_forceaniso mat_queue_mode dxlevel)
+  local -a vals=(3         4             16             -1             95)
+  local i k v
+  for i in "${!keys[@]}"; do
+    k="${keys[$i]}"; v="${vals[$i]}"
+    if grep -q "\"setting\.${k}\"" "$vid"; then
+      [[ "$seed_all" == 1 ]] || continue          # respect the player's saved value
+      L4D2_K="$k" L4D2_V="$v" perl -i -pe 's/("setting\.$ENV{L4D2_K}"\s+)"[^"]*"/$1"$ENV{L4D2_V}"/' "$vid"
+    else
+      L4D2_K="$k" L4D2_V="$v" perl -i -pe 'print "\t\"setting.$ENV{L4D2_K}\"\t\t\"$ENV{L4D2_V}\"\n" if /^\}/' "$vid"
+    fi
+  done
+
+  # Resolution (D2): write when establishing the baseline, when the key is missing, or
+  # when L4D2_RES explicitly overrides; otherwise leave the player's saved resolution.
+  local resnote=""
+  if [[ "$seed_all" == 1 || -n "${L4D2_RES:-}" ]] || ! grep -q '"setting\.defaultres"' "$vid"; then
+    local res rw rh pair
     if res=$(detect_resolution); then
       rw="${res% *}"; rh="${res#* }"
-      keys+=(defaultres defaultresheight)
-      vals+=("$rw"      "$rh")
+      for pair in "defaultres:$rw" "defaultresheight:$rh"; do
+        k="${pair%%:*}"; v="${pair#*:}"
+        if grep -q "\"setting\.${k}\"" "$vid"; then
+          L4D2_K="$k" L4D2_V="$v" perl -i -pe 's/("setting\.$ENV{L4D2_K}"\s+)"[^"]*"/$1"$ENV{L4D2_V}"/' "$vid"
+        else
+          L4D2_K="$k" L4D2_V="$v" perl -i -pe 'print "\t\"setting.$ENV{L4D2_K}\"\t\t\"$ENV{L4D2_V}\"\n" if /^\}/' "$vid"
+        fi
+      done
       resnote=" · ${rw}×${rh}"
     else
       warn "Could not detect display resolution — leaving video.txt defaultres unchanged"
     fi
-    local i k v
-    for i in "${!keys[@]}"; do
-      k="${keys[$i]}"; v="${vals[$i]}"
-      if grep -q "\"setting\.${k}\"" "$vid"; then
-        # Update the existing value in place.
-        L4D2_K="$k" L4D2_V="$v" perl -i -pe 's/("setting\.$ENV{L4D2_K}"\s+)"[^"]*"/$1"$ENV{L4D2_V}"/' "$vid"
-      else
-        # Insert before the closing brace, matching the file's tab style.
-        L4D2_K="$k" L4D2_V="$v" perl -i -pe 'print "\t\"setting.$ENV{L4D2_K}\"\t\t\"$ENV{L4D2_V}\"\n" if /^\}/' "$vid"
-      fi
-    done
-    ok "Asserted video.txt: $mode · 16× aniso · gpu_level 3 · dxlevel 95${resnote}"
-  else
-    warn "video.txt not found ($vid) — skipping max-settings assertion"
   fi
 
-  # C1 — kill any persistent multicore-landmine autoexec.cfg.  A launcher-written
-  # one (carries our marker) is removed whole; a user's own autoexec keeps its
-  # other lines and loses only the mat_queue_mode override.
-  if [[ -f "$autoexec" ]]; then
-    if grep -q "L4D2-launcher: serialize D3D9" "$autoexec"; then
-      rm -f "$autoexec"
-      warn "Removed launcher-written autoexec.cfg (the --wined3d multicore landmine)"
-    elif grep -qi "mat_queue_mode" "$autoexec"; then
-      perl -i -ne 'print unless /^\s*mat_queue_mode\b/' "$autoexec"
-      warn "Stripped mat_queue_mode from your autoexec.cfg (kept the rest)"
-    fi
+  if [[ "$seed_all" == 1 ]]; then
+    ok "Applied max-settings baseline to video.txt (4× MSAA · multicore · 16× aniso · gpu_level 3 · dxlevel 95${resnote})"
+  elif [[ -n "$resnote" ]]; then
+    ok "Respecting saved video.txt settings · set resolution${resnote}"
+  else
+    ok "Respecting saved video.txt settings (no overwrite)"
   fi
+
+  # C1 — remove ONLY a launcher-written multicore-landmine autoexec.cfg (our marker).
+  # A player's own autoexec is left untouched: mat_queue_mode there is now a valid choice.
+  if [[ -f "$autoexec" ]] && grep -q "L4D2-launcher: serialize D3D9" "$autoexec"; then
+    rm -f "$autoexec"
+    warn "Removed launcher-written autoexec.cfg (the old --wined3d multicore landmine)"
+  fi
+}
+
+# --max-settings — deliberately re-apply the recommended max baseline to video.txt
+# (e.g. after a Steam "verify integrity" regenerates it, or to undo experimentation).
+# Normal launches respect your saved settings; this is the explicit opt-in reset.
+do_max_settings() {
+  say "Re-applying the recommended max-settings baseline to video.txt…"
+  FORCE_MAX=1 assert_max_settings
 }
 
 do_launch() {
@@ -1299,18 +1355,23 @@ do_bridge() {
 }
 
 # Restore state mutated by a --wined3d run (registered as its EXIT trap): un-stash
-# L4D2's bundled DXVK and put video.txt's mat_queue_mode back to -1 (multicore).
-# C1: this is what keeps a wined3d run's serialised-D3D9 state from leaking onto
-# the normal DXVK path.  (do_launch's assert_max_settings also re-asserts -1
-# defensively, in case a wined3d run is hard-killed before this trap fires.)
+# L4D2's bundled DXVK and restore video.txt's mat_queue_mode to its PRE-RUN value
+# (read from the .wined3d-mqm-restore sidecar — not a hardcoded -1, so a player who
+# prefers single-core keeps their choice).  C1: this keeps a wined3d run's serialised-
+# D3D9 state from leaking onto the normal DXVK path.  If this trap never fires (hard
+# kill), the sidecar survives and do_launch's assert_max_settings self-heals from it.
 _wined3d_restore() {
   local dxvk="$GAME_DIR/bin/dxvk_d3d9.dll"
   local stashed="$GAME_DIR/bin/dxvk_d3d9.dll.disabled-for-wined3d"
   local vid="$GAME_DIR/left4dead2/cfg/video.txt"
+  local mqm_restore="$GAME_DIR/left4dead2/cfg/.wined3d-mqm-restore"
   [[ -f "$stashed" ]] && mv "$stashed" "$dxvk" && ok "Restored dxvk_d3d9.dll"
-  [[ -f "$vid" ]] && \
-    perl -i -pe 's/("setting\.mat_queue_mode"\s+)"-?\d+"/${1}"-1"/' "$vid" && \
-    ok "Restored video.txt mat_queue_mode -1 (multicore)"
+  if [[ -f "$vid" && -f "$mqm_restore" ]]; then
+    local prior; prior="$(tr -dc '0-9-' < "$mqm_restore")"; [[ -n "$prior" ]] || prior=-1
+    L4D2_V="$prior" perl -i -pe 's/("setting\.mat_queue_mode"\s+)"-?\d+"/$1"$ENV{L4D2_V}"/' "$vid" && \
+      ok "Restored video.txt mat_queue_mode $prior"
+    rm -f "$mqm_restore"
+  fi
   return 0
 }
 
@@ -1353,14 +1414,21 @@ do_launch_wined3d() {
   # violations in wined3d.dll across threads → tier0 0xc0000417 fatal).
   # video.txt's "setting.mat_queue_mode" LATCHES at material-system init and
   # overrides config.cfg / autoexec / launch-arg, so it must read 0 during a
-  # wined3d run — we flip it to 0 here and the trap reverts it to -1 on exit.
+  # wined3d run.  We save the PRE-RUN value to a sidecar, flip it to 0 here, and the
+  # EXIT trap restores that saved value (so a player's single-core preference, or
+  # multicore, is preserved — not forced back to -1).  If the run is hard-killed, the
+  # sidecar survives and the next launch's assert_max_settings self-heals from it.
   # We deliberately do NOT write a persistent autoexec.cfg: that file
   # (mat_queue_mode 0) was the C1 "multicore landmine" — the engine exec'd it on
   # EVERY launch, including DXVK, silently killing multicore.  The
   # +mat_queue_mode 0 launch arg below already covers this single run.
   if [[ -d "$l4d2_cfg" ]]; then
-    [[ -f "$l4d2_cfg/video.txt" ]] && \
+    if [[ -f "$l4d2_cfg/video.txt" ]]; then
+      local _mqm; _mqm="$(perl -ne 'print $1 if /"setting\.mat_queue_mode"\s+"(-?\d+)"/' "$l4d2_cfg/video.txt")"
+      [[ -n "$_mqm" ]] || _mqm=-1
+      printf '%s\n' "$_mqm" > "$l4d2_cfg/.wined3d-mqm-restore"
       perl -i -pe 's/("setting\.mat_queue_mode"\s+)"-?\d+"/${1}"0"/' "$l4d2_cfg/video.txt"
+    fi
     # Belt-and-suspenders: clear any stale landmine autoexec.cfg from older runs.
     [[ -f "$l4d2_cfg/autoexec.cfg" ]] && \
       grep -q "L4D2-launcher: serialize D3D9" "$l4d2_cfg/autoexec.cfg" && \
@@ -1438,6 +1506,7 @@ case "$ACTION" in
   wined3d)             do_launch_wined3d ;;
   bridge)              do_bridge ;;
   steam-check)         mac_steam_preflight ;;
+  max-settings)        do_max_settings ;;
   launch)              do_launch ;;
   *)                   die "Unknown action: $ACTION" ;;
 esac

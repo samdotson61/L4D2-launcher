@@ -19,6 +19,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `--build-bridge` | Compile `steam_api.dll` + `steam_helper` only |
 | `--install-bridge` | Install bridge DLL + apply on-disk binary patches + copy `steam.dll`/`GameOverlayRenderer.dll` |
 | `--steam-check` | Verify the macOS Steam client is running + signed in, and show the persona/SteamID the bridge will authenticate as (D3) |
+| `--max-settings` | Re-apply the recommended **max graphics baseline** to `video.txt` (resolution, 4× MSAA, multicore, 16× aniso, `gpu_level 3`, `dxlevel 95`). Normal launches **respect your saved settings**; use this to reset to max (e.g. after a Steam "verify integrity" regenerates `video.txt`). |
 | `--install-goldberg` / `--uninstall-goldberg` | Swap in/out the Goldberg shim (alternative to our bridge) |
 | `--install-steam` / `--steam` | Install / launch Steam-for-Windows in the prefix |
 | `--link-game` | Symlink an existing L4D2 install into the prefix's Steam library (avoid re-download) |
@@ -28,7 +29,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `--debug` | Verbose Wine logging to stderr |
 | `--diag` | **Light** diagnostics → `game-stderr.log` (per-encoder GPU-fault log + DXVK info; playable) |
 | `--diag-gfx` | **Heavy** DXVK+MoltenVK+Metal validation (names OOB faults; big stutter; diagnostic only) |
-| `--wined3d` | Bypass DXVK; use Wine's native d3d9 → wined3d → MoltenVK (set `WINED3D_RENDERER=gl` for the GL backend). Serialises D3D9 (`mat_queue_mode 0`) for **that run only** — multicore (`-1`) is reverted on exit and no `autoexec.cfg` is persisted ([issue #9](03-known-issues.md), resolved in C1). |
+| `--wined3d` | Bypass DXVK; use Wine's native d3d9 → wined3d → MoltenVK (set `WINED3D_RENDERER=gl` for the GL backend). Serialises D3D9 (`mat_queue_mode 0`) for **that run only** — your pre-run `mat_queue_mode` is saved to a sidecar and restored on exit (and self-heals on the next launch if the run is hard-killed); no `autoexec.cfg` is persisted ([issue #9](03-known-issues.md), resolved in C1). |
 | `--help` | Usage |
 | `-- <args>` | Forward the rest to `left4dead2.exe`, e.g. `-- +map c1m1_hotel -windowed` |
 
@@ -69,7 +70,11 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 
 ## Game graphics settings
 
-Live in `left4dead2/cfg/video.txt` (resolution, MSAA, multicore, gpu_level) and the dxsupport files. The user's max-settings preference (**4× MSAA + multicore + max textures + DX9.5**) is a **hard, non-negotiable constraint** and must be preserved — see [01-current-state.md](01-current-state.md). The DXVK path forces nothing down, and `assert_max_settings` now idempotently re-asserts the full max-settings block in `video.txt` on **every** launch (`mat_antialias 4`, `mat_queue_mode -1`, `mat_forceaniso 16`, `gpu_level 3`, `dxlevel 95`, plus this Mac's detected `defaultres`/`defaultresheight` — D2) — [Phase 1 / C2, done](08-roadmap.md#c2-single-source-of-truth-for-settings). The `--wined3d` path serialises D3D9 for its own run only and no longer leaks `mat_queue_mode 0` into the DXVK path ([issue #9](03-known-issues.md), resolved in C1).
+Live in `left4dead2/cfg/video.txt` (resolution, MSAA, aniso, multicore, gpu_level, dxlevel) and the dxsupport files. **Max settings is the DEFAULT, and the player is in control** *(policy revised 2026-06-04)*: the launcher seeds the recommended max baseline (**4× MSAA + multicore + max textures + DX9.5** + this Mac's detected resolution) on the **first run**, and any setting you then change in the in-game **Options → Video** menu **takes effect and persists across restarts** — so you can adapt to a different Mac/display. `assert_max_settings` enforces this with **seed-not-overwrite**: it writes the full baseline only on the first launcher run (no `video.txt.orig-pre-launcher` snapshot yet) or on explicit **`--max-settings`**, and otherwise only fills in a default for a key you haven't set — it **never** overwrites a value already present. (`video.txt` latches at material-system init and overrides launch args, so your saved values win over the `+mat_antialias` / `+mat_queue_mode` launch args — those persist.) `L4D2_RES` remains an explicit per-launch resolution override. See [Phase 1 / C2](08-roadmap.md#c2-single-source-of-truth-for-settings) and the binding constraint in [08-roadmap.md](08-roadmap.md).
+
+> **Known boundary — three settings don't persist yet.** The ConVar-only quality pins `mat_picmip 0` (max textures), `r_waterforceexpensive 1` (expensive water), and `r_shadowrendertotexture 1` (RTT shadows) have **no `video.txt` key**, so they ride in `DEFAULT_GAME_ARGS` and are re-applied every launch — a change to these from the console/config won't survive a restart. Everything in **Options → Video** (resolution, MSAA, anisotropic filtering, detail/effect/shader levels via `gpu_level`, multicore, vsync) **does** persist. Making those three player-persistable is a possible follow-up.
+
+The `--wined3d` path serialises D3D9 for its own run only and no longer leaks `mat_queue_mode 0` into the DXVK path ([issue #9](03-known-issues.md), resolved in C1).
 
 ## Signing in to Steam
 

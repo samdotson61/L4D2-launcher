@@ -60,23 +60,29 @@ mat_queue_mode -1 (multicore), mat_picmip 0
 mat_vsync 1, mat_triplebuffered 1, mat_monitorgamma 2.2
 defaultres 1512 × 982, windowed (fullscreen 0), no border (nowindowborder 1)
 ```
-> **`setting.dxlevel 95` is now asserted on every launch** by `assert_max_settings`
-> ([C2](08-roadmap.md#c2-single-source-of-truth-for-settings)) — it isn't in the static listing above
-> because the launcher adds it (and re-asserts the rest of the block) at launch time, snapshotting the
-> original to `video.txt.orig-pre-launcher` first. dxlevel-forcing alone does **not** enable HDR; making
-> the `dxsupport.cfg` edits equally durable is the rest of
+> **These are the SEEDED max-settings DEFAULTS, and players may change them** *(policy revised 2026-06-04)*.
+> The launcher writes this baseline only on the **first run** (or on `--max-settings`); after that any in-game
+> Options → Video change **persists** and the live file may differ from the listing above. `assert_max_settings`
+> uses **seed-not-overwrite** — see [C2](08-roadmap.md#c2-single-source-of-truth-for-settings). (This replaced
+> the old "re-assert the whole block every launch" behaviour — which was exactly why **saved resolution didn't
+> persist**.)
+>
+> **`setting.dxlevel 95`** is part of the seeded baseline (not in the static listing above because the launcher
+> adds it on first run / `--max-settings`, snapshotting the original to `video.txt.orig-pre-launcher` first).
+> dxlevel-forcing alone does **not** enable HDR; making the `dxsupport.cfg` edits re-appliable is the rest of
 > [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).
 >
-> **`defaultres`/`defaultresheight` are now auto-detected per-Mac (D2, DONE 2026-06-04)** — no longer pinned
-> to this 14" MacBook's 1512×982. `assert_max_settings` writes the main display's **logical** resolution every
-> launch via `detect_resolution()` (`L4D2_RES` override → AppKit `NSScreen` → `system_profiler`); 1512×982 is
-> just this panel's value (3024×1964 backing). Windowed-borderless is unchanged. See
+> **`defaultres`/`defaultresheight` are auto-detected per-Mac (D2, DONE 2026-06-04)** — no longer pinned to this
+> 14" MacBook's 1512×982. `detect_resolution()` (`L4D2_RES` override → AppKit `NSScreen` → `system_profiler`)
+> feeds the **seed**; 1512×982 is just this panel's logical value (3024×1964 backing). Windowed-borderless is the
+> default but is player-changeable too (the live file may read `fullscreen 1` if the player set it). See
 > [plan D2](08-roadmap.md#d2-dynamic-resolution).
 >
-> **Multicore landmine fixed** ([C1](08-roadmap.md#c1-neutralise-the-multicore-landmine-must-fix) /
-> issue #9): `mat_queue_mode -1` is correct here and is re-asserted every launch. The `--wined3d` path no
-> longer persists `mat_queue_mode 0` — it scopes serialisation to that one run (reverted on exit by
-> `_wined3d_restore`) and writes no `autoexec.cfg`, and the DXVK launch strips any stale one.
+> **Multicore landmine fixed** ([C1](08-roadmap.md#c1-neutralise-the-multicore-landmine-must-fix) / issue #9):
+> `mat_queue_mode -1` is the seeded default; a player may change it and it persists. The `--wined3d` path no
+> longer persists `mat_queue_mode 0` — it scopes serialisation to that one run (saving the pre-run value to a
+> sidecar that `_wined3d_restore` restores on exit, and that self-heals on the next launch if hard-killed) and
+> writes no `autoexec.cfg`.
 
 ### dxsupport (GPU→settings database) — **edited this session**
 - `bin/dxsupport.cfg` block `"0"` (the unmatched-GPU default): `maxdxlevel 90→98`, `dxlevel 90→95`. Backup at `bin/dxsupport.cfg.orig-pre-dx95`.
@@ -117,4 +123,4 @@ MVK_CONFIG_FAST_MATH_ENABLED=0            (fast-math NaN/Inf in tonemap faults A
 > is **online multiplayer** (Phase 2) and **cross-Mac validation** of the now-code-complete portability work
 > (Phase 3 — D4 clean-Mac build, D5 non-M4 test) — see [08-roadmap.md](08-roadmap.md).
 
-> The `dxsupport.cfg` / `dxsupport_override.cfg` / `video.txt` edits live in the **Steam game folder**, not this repo. A Steam "verify integrity of game files" or game update will regenerate `bin/dxsupport.cfg` and silently revert the HDR-forcing edit. The launcher now re-asserts **`video.txt`** (incl. `mat_queue_mode -1` + `dxlevel 95`) on every launch via `assert_max_settings` ([C2](08-roadmap.md#c2-single-source-of-truth-for-settings)); making the **`dxsupport*.cfg`** edits equally durable is the rest of [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).
+> The `dxsupport.cfg` / `dxsupport_override.cfg` / `video.txt` edits live in the **Steam game folder**, not this repo. A Steam "verify integrity of game files" or game update will regenerate `bin/dxsupport.cfg` (and `video.txt`). Note HDR no longer depends on these edits — the engine runs `mat_dxlevel 100` regardless and HDR is gated by a launch arg (since removed) — so a revert won't re-break HDR. Since the launcher now **seeds** `video.txt` rather than re-asserting it every launch (so player settings persist — [C2](08-roadmap.md#c2-single-source-of-truth-for-settings)), recover the max baseline after a Steam file-verify by running **`./play-l4d2.sh --max-settings`**; making the **`dxsupport*.cfg`** edits re-appliable the same way is the rest of [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).

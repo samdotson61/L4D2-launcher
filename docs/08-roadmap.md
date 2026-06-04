@@ -1,14 +1,20 @@
 # Roadmap — Online-Enabled, Max-Settings, Portable L4D2
 
 **Created:** 2026-06-02 · Organized by **delivery phase**. The goal: take the current
-single-player-only build to a **fully online-enabled** L4D2 with **proper HDR/DX9 shading**, kept
-at **maximum settings throughout (including multicore rendering)**, and make the whole wrapper
-**portable to any Apple Silicon Mac** by plugging in the real Steam values from that Mac's Steam app.
+single-player-only build to a **fully online-enabled** L4D2 with **proper HDR/DX9 shading**, with
+**maximum settings as the default** (the build is tuned for it) while **letting players change graphics
+settings and have them persist**, and make the whole wrapper **portable to any Apple Silicon Mac** by
+plugging in the real Steam values from that Mac's Steam app.
 
-> **Binding constraints for every phase (non-negotiable):**
-> 1. **Max settings always** — 4× MSAA, `mat_queue_mode -1` (multicore), `mat_picmip 0`,
->    `gpu_level 3`, expensive water, RTT shadows, 16× aniso, DX9.5. **Never lower a setting to
->    "fix" a bug — fix the cause.** Multicore rendering specifically stays on.
+> **Binding constraints for every phase:**
+> 1. **Max settings is the DEFAULT, not a cage** *(revised 2026-06-04)* — 4× MSAA, `mat_queue_mode -1`
+>    (multicore), `mat_picmip 0`, `gpu_level 3`, expensive water, RTT shadows, 16× aniso, DX9.5 is the
+>    **recommended baseline the launcher seeds on first run** and the config the build is tuned for. But
+>    the **player is in control**: any graphics setting changed in-game **takes effect and persists across
+>    restarts**, so the wrapper adapts to different Macs/displays. Two rules still hold: **never lower a
+>    setting to "fix" a bug — fix the cause** (max must remain fully playable), and **never force a
+>    player's chosen setting back to max** either. `--max-settings` re-applies the baseline on demand. See
+>    [C2](#c2-single-source-of-truth-for-settings) and [05-usage.md](05-usage.md#game-graphics-settings).
 > 2. **Docs in lockstep** — every code/config change updates the relevant doc in this folder, and
 >    the two READMEs stay identical + current, in the same step. No silent drift.
 
@@ -30,8 +36,8 @@ The shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-
 | `git HEAD` | `9a5dedf` — *"working and playable my boy"* (HDR-playability milestone committed 2026-06-04; supersedes `8cdc8ca` "working dx8 no tonemapping") |
 | In-game shading | **Full DX9.5 (`mat_dxlevel 100`), HDR playable (`mat_hdr_level 2`)** — proper HDR shading at max settings, **playable end-to-end** *(rendering fixed 2026-06-03, playability fixed 2026-06-04 — the `0x010c` device-lost is solved, see [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) + [A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04))* |
 | Multiplayer | **Not working** — bridge plumbing exists, but the engine is never put into Steam "online mode" |
-| `video.txt` dxlevel | Launcher now asserts `setting.dxlevel 95` on every launch (C2 ); `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
-| Multicore | `mat_queue_mode -1` (**on**), now re-asserted in `video.txt` every launch; the `--wined3d` landmine is fixed — see [C1](#c1-neutralise-the-multicore-landmine-must-fix) |
+| `video.txt` dxlevel | Launcher **seeds** `setting.dxlevel 95` as the first-run default (C2, revised 2026-06-04); a player may change it (HDR needs ≥ DX9). `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
+| Multicore | `mat_queue_mode -1` (**on by default**), seeded in `video.txt`; **player-changeable + persists** (revised 2026-06-04). The `--wined3d` landmine is fixed (now self-heals via a sidecar) — see [C1](#c1-neutralise-the-multicore-landmine-must-fix) |
 | DXVK | **1.10.3** deployed (working). **2.5.3** explored 2026-06-02 (allocator angle) but **ruled out as the HDR lever** — a fully-patched 2.5.3 renders identically to 1.10.3; HDR was never a DXVK problem (see [A1, SUPERSEDED](#a1-swap-to-dxvk-253-and-confirm-the-hdr-format--superseded)) |
 | Stack | Whisky-Wine 11 · MoltenVK 1.4.1 + patch · Rosetta 2 · macOS 26.x · M4 Pro |
 
@@ -122,12 +128,17 @@ perf nit, issue #5), not a blocker.
 > "verify integrity"/update. It is **not** an HDR-enablement task.
 - `bin/dxsupport.cfg` block `"0"`: `maxdxlevel 98` / `dxlevel 95` (already applied).
 - `left4dead2/dxsupport_override.cfg` block `"3"`: `vendorid 0x106b` → `dxlevel 95 / maxdxlevel 98`.
-- `video.txt`: add `setting.dxlevel 95` — **done via [C2](#c2-single-source-of-truth-for-settings)**
-  (`assert_max_settings` asserts it every launch). (`maxdxlevel`/`mindxlevel` are `dxsupport.cfg` keys, not
-  VideoConfig settings, so they don't belong in `video.txt`.)
-- **Launcher re-asserts on every launch** so a Steam "verify integrity"/update can't silently revert the
-  max-settings/`dxlevel 95` block. **Partly done:** C2 re-asserts `video.txt` (incl. `dxlevel 95`); the two
-  `dxsupport*.cfg` files still need the same treatment, joined to the existing bridge-DLL/binary-patch re-apply step.
+- `video.txt`: seed `setting.dxlevel 95` — **done via [C2](#c2-single-source-of-truth-for-settings)**
+  (`assert_max_settings` seeds it on first run / `--max-settings`). (`maxdxlevel`/`mindxlevel` are
+  `dxsupport.cfg` keys, not VideoConfig settings, so they don't belong in `video.txt`.)
+- **Durability is now opt-in (revised 2026-06-04):** since the launcher no longer force-re-asserts settings
+  every launch (that would clobber player choices — see [C2](#c2-single-source-of-truth-for-settings)), a Steam
+  "verify integrity"/update that regenerates `video.txt`/`dxsupport*.cfg` is recovered by running
+  **`./play-l4d2.sh --max-settings`** (re-applies the `video.txt` baseline) rather than silently every launch.
+  This is lower-stakes than once thought: HDR does **not** depend on the `dxsupport.cfg` dxlevel edits (the
+  engine runs `mat_dxlevel 100` regardless; HDR was gated by a launch arg, since removed), so a reverted
+  `dxsupport.cfg` no longer re-breaks HDR. Making the two `dxsupport*.cfg` edits re-appliable via the same
+  `--max-settings`/re-apply step is the remaining A2 scope.
 
 ### A3. Tonemapping without the M4 AGX auto-exposure crash
 > **Update 2026-06-03:** HDR is now fully ON by default (the `+mat_hdr_level 1` arg that forced fullbright is
@@ -166,23 +177,41 @@ so the user remains the visual authority.) Residual: an occasional stutter (perf
 **and** write a **persistent `autoexec.cfg`** containing `mat_queue_mode 0`, which the engine then exec'd on
 **every** launch (including the DXVK path) — silently killing multicore. Implemented:
 - The `--wined3d` path **no longer writes `autoexec.cfg`**; serialisation is scoped to that run only — the
-  `+mat_queue_mode 0` launch arg plus a `video.txt` flip that `_wined3d_restore` (an `EXIT` trap) reverts to
-  `-1` on exit.
-- Every DXVK launch runs `assert_max_settings`, which **re-asserts `mat_queue_mode -1`** in `video.txt` and
-  **removes any stale `mat_queue_mode 0` `autoexec.cfg`** — so even a hard-killed `--wined3d` run self-heals.
+  `+mat_queue_mode 0` launch arg plus a `video.txt` flip. It first saves the pre-run `mat_queue_mode` to a
+  `.wined3d-mqm-restore` sidecar; `_wined3d_restore` (an `EXIT` trap) restores **that exact value** on exit
+  (not a hardcoded `-1`), so a player's single-core *or* multicore preference survives a wined3d run.
+- **Update 2026-06-04 (settings now persist):** `assert_max_settings` no longer force-re-asserts
+  `mat_queue_mode -1` every launch — that would clobber a player's choice (see [C2](#c2-single-source-of-truth-for-settings)).
+  The landmine guarantee is preserved differently: if a hard-killed `--wined3d` run left the sidecar behind, the
+  next launch's `assert_max_settings` **self-heals** `mat_queue_mode` from it and deletes the sidecar; it also
+  still removes any launcher-written `mat_queue_mode 0` `autoexec.cfg`.
 
 ### C2. Single source of truth for settings
-**DONE (2026-06-02).** `assert_max_settings` idempotently asserts the VideoConfig half of the
-max-settings block into `video.txt` on every launch — `gpu_level 3`, `mat_antialias 4` (4× MSAA),
-`mat_forceaniso 16`, `mat_queue_mode -1`, **`dxlevel 95`** — and snapshots the original to
-`video.txt.orig-pre-launcher`. The ConVar-only settings (picmip 0, expensive water, RTT shadows) ride in
-`DEFAULT_GAME_ARGS`, which agrees with this block. The stale launcher comments and the old "MSAA off / queue 0
-was the verified-clean set" claim are gone. **Correction 2026-06-03:** an earlier rewrite called `mat_hdr_level`
+**DONE (2026-06-02) · REVISED to seed-not-enforce (2026-06-04).** `assert_max_settings` manages the
+VideoConfig half of the max baseline in `video.txt` — `gpu_level 3`, `mat_antialias 4` (4× MSAA),
+`mat_forceaniso 16`, `mat_queue_mode -1`, **`dxlevel 95`**, plus this Mac's detected `defaultres`/
+`defaultresheight` (D2) — and snapshots the original to `video.txt.orig-pre-launcher`.
+> **Policy change 2026-06-04 — it no longer force-overwrites these every launch.** The old behaviour
+> (re-write the whole block from `detect_resolution` on every launch) was exactly why **saved resolution
+> didn't persist** — and would equally clobber any in-game MSAA/aniso/detail/multicore change. New behaviour:
+> **WRITE the full baseline only on the first launcher run** (no `video.txt.orig-pre-launcher` snapshot yet)
+> **or on explicit `--max-settings`** (`FORCE_MAX=1`); on **every later run, SEED-IF-ABSENT only** — fill in a
+> max default for a key the player/engine hasn't written, but **never overwrite a value already present**.
+> `video.txt` latches at material-system init and overrides launch args, so a player's saved value beats the
+> (now inert) `+mat_antialias`/`+mat_queue_mode` args in `DEFAULT_GAME_ARGS` — those settings persist. `L4D2_RES`
+> stays an explicit per-launch resolution override. The three ConVar-only quality pins (`mat_picmip 0`,
+> `r_waterforceexpensive 1`, `r_shadowrendertotexture 1`) have no `video.txt` key and are still passed every
+> launch, so they remain launcher-defaulted (not yet player-persistable) — a known boundary, see
+> [05-usage.md](05-usage.md#game-graphics-settings).
+
+The ConVar-only settings (picmip 0, expensive water, RTT shadows) ride in `DEFAULT_GAME_ARGS`. The stale
+launcher comments and the old "MSAA off / queue 0 was the verified-clean set" claim are gone.
+**Correction 2026-06-03:** an earlier rewrite called `mat_hdr_level`
 "a no-op in this retail build" — that was *wrong*. The engine logs `Unknown command` but **queues** the convar
 and applies it at material-system init, so `+mat_hdr_level 1` actively **pinned HDR off**. Both `+mat_hdr_level`
 tokens have since been **removed** from `DEFAULT_GAME_ARGS`, letting the hardware default (level 2, full HDR)
 stand — see Phase 1 box and [03-known-issues #1](03-known-issues.md).
-> Note: asserting `dxlevel 95` in `video.txt` also lands the **`video.txt` portion of [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8)** early. A2's remaining scope is making the `dxsupport.cfg` / `dxsupport_override.cfg` edits equally durable across a Steam file-verify.
+> Note: seeding `dxlevel 95` into `video.txt` also lands the **`video.txt` portion of [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8)** (re-appliable via `--max-settings`). A2's remaining scope is making the `dxsupport.cfg` / `dxsupport_override.cfg` edits equally re-appliable across a Steam file-verify.
 
 ### C3. Verify max survives HDR-on + online mode
 **Max + HDR-on: confirmed (2026-06-04).** The `0x010c` crash stays away at max settings with HDR on — the
@@ -270,10 +299,13 @@ M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` file
 > resolve and to name their path on a dlopen miss. No more per-user path.
 
 ### D2. Dynamic resolution
-> **DONE 2026-06-04.** `video.txt`'s resolution is no longer pinned to 1512×982. `play-l4d2.sh` gained
-> `detect_resolution()`, and `assert_max_settings` now asserts `defaultres`/`defaultresheight` from it every
-> launch (in-place update, no duplication; windowed-borderless `fullscreen 0` / `nowindowborder 1` left
-> untouched). Order: **`L4D2_RES="WxH"`** override → **AppKit `NSScreen.mainScreen.frame`** via in-process
+> **DONE 2026-06-04 · persistence-aware.** `video.txt`'s resolution is no longer pinned to 1512×982.
+> `play-l4d2.sh` gained `detect_resolution()`, and `assert_max_settings` seeds `defaultres`/`defaultresheight`
+> from it (in-place update, no duplication; windowed-borderless `fullscreen 0` / `nowindowborder 1` left
+> untouched) — but **only on the first launcher run, on `--max-settings`, when the key is missing, or when
+> `L4D2_RES` is set**; a player's in-game resolution change otherwise **persists** (it used to be overwritten
+> every launch — see [C2](#c2-single-source-of-truth-for-settings)). Order: **`L4D2_RES="WxH"`** override →
+> **AppKit `NSScreen.mainScreen.frame`** via in-process
 > `osascript` (no Finder-automation prompt) → **`system_profiler`** (native ÷2 for a Retina panel). It writes
 > the **logical** (point) resolution, *not* the 3024×1964 backing — 1512×982 is the proven-playable value,
 > the borderless window is sized in points, and writing backing pixels would 4× the GPU load on a freshly-
@@ -317,7 +349,7 @@ M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` file
 > **DONE 2026-06-04 (sequence wired + prereqs documented).** A no-arg `./play-l4d2.sh` runs the full
 > first-run pipeline: preflight (macOS/arm64/Rosetta/GPU) → `ensure_gptk` (auto-fetches the Whisky-Wine
 > bundle if absent) → `ensure_patched_moltenvk` → `ensure_prefix` (wineboot) → Mac-Steam preflight (D3) →
-> bridge build/install + helper → `assert_max_settings` (detects resolution, D2) → launch. Exact toolchain
+> bridge build/install + helper → `assert_max_settings` (first run: seeds max defaults + detects resolution, C2/D2) → launch. Exact toolchain
 > prereqs (Xcode CLT, `brew install meson ninja glslang`, mingw-w64) live in
 > [06-building.md](06-building.md#toolchain-prerequisites). **Caveat:** on a truly fresh clone run
 > `build-deps.sh` first — the patched MoltenVK/DXVK binaries aren't in git (the launcher auto-builds the

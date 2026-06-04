@@ -118,21 +118,21 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
 
 ## 8. Durability: game-folder edits get reverted 
 
-**Symptom.** HDR-forcing config (`dxsupport.cfg`, `dxsupport_override.cfg`, `video.txt`) lives in the Steam game folder. A Steam "verify integrity of game files" or a game update regenerates `bin/dxsupport.cfg` and silently reverts the edit, which would re-break HDR (once it's working).
+**Symptom.** Launcher-managed config (`dxsupport.cfg`, `dxsupport_override.cfg`, `video.txt`) lives in the Steam game folder. A Steam "verify integrity of game files" or a game update regenerates these and silently reverts the edits. *(Note: this no longer re-breaks HDR — HDR is gated by a launch arg, since removed, and the engine runs `mat_dxlevel 100` regardless of the `dxsupport.cfg` dxlevel edits. The remaining concern is just losing the max-settings baseline.)*
 
-**Fix (partial — C2 done).** `play-l4d2.sh`'s `assert_max_settings` now re-asserts the **`video.txt`** block (incl. `dxlevel 95`) on every launch, joining the bridge-DLL/binary-patch re-apply step, and snapshots the original to `video.txt.orig-pre-launcher`. Still **TODO ([A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8))**: re-assert the **`dxsupport.cfg` / `dxsupport_override.cfg`** edits the same way, since a Steam verify regenerates those.
+**Fix (revised 2026-06-04 — opt-in, not silent).** The launcher no longer force-re-asserts `video.txt` every launch — that would clobber the player's saved settings (see [C2](08-roadmap.md#c2-single-source-of-truth-for-settings)). Instead, **`./play-l4d2.sh --max-settings`** re-applies the `video.txt` max baseline (`dxlevel 95` included) on demand, e.g. after a Steam file-verify; the first-run seed snapshots the original to `video.txt.orig-pre-launcher`. Still **TODO ([A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8))**: fold the **`dxsupport.cfg` / `dxsupport_override.cfg`** edits into the same `--max-settings`/re-apply step.
 
 ---
 
 ## 9. Multicore silently forced off by the `--wined3d` path RESOLVED (Phase 1 / C1+C2)
 
-**Symptom (historical).** Multicore rendering (`mat_queue_mode -1`) could silently revert to single-core (`0`) — a **violation of the hard "max settings always, including multicore" constraint** — without any setting being changed by hand.
+**Symptom (historical).** Multicore rendering (`mat_queue_mode -1`) could silently revert to single-core (`0`) **without the player choosing it** — an unintended persistent downgrade leaking out of a `--wined3d` run. (Multicore is now player-changeable *by design* — see [C2, revised](08-roadmap.md#c2-single-source-of-truth-for-settings) — but it must never flip *unintentionally*.)
 
 **Cause (historical).** `play-l4d2.sh`'s `--wined3d` launch path did two **persistent** things: it `perl -pi` rewrote `video.txt`'s `setting.mat_queue_mode` to `0`, **and** it wrote a `left4dead2/cfg/autoexec.cfg` containing `mat_queue_mode 0`. `autoexec.cfg` is exec'd by the engine on **every** launch (including the normal DXVK path), so once `--wined3d` had run, multicore stayed off everywhere until something put it back. (The serialisation rationale is real — wined3d crashes under Source's multi-threaded D3D9 submission — but the *persistence* leaked into the DXVK path.)
 
 **Fix (done — [C1](08-roadmap.md#c1-neutralise-the-multicore-landmine-must-fix) + [C2](08-roadmap.md#c2-single-source-of-truth-for-settings), 2026-06-02).** Serialisation is now scoped to the `--wined3d` run only:
-> - That path flips `video.txt`'s `mat_queue_mode` to `0` for the run and reverts it to `-1` on exit (`_wined3d_restore`, an `EXIT` trap), and **no longer writes `autoexec.cfg`** at all (the `+mat_queue_mode 0` launch arg covers that single run).
-> - Every DXVK launch runs `assert_max_settings`, which re-asserts `mat_queue_mode -1` (plus the rest of the max block) in `video.txt` and **strips any stale landmine `autoexec.cfg`** — so even a hard-killed `--wined3d` run self-heals on the next launch.
+> - That path saves the pre-run `mat_queue_mode` to a `.wined3d-mqm-restore` sidecar, flips `video.txt`'s `mat_queue_mode` to `0` for the run, and restores **that saved value** on exit (`_wined3d_restore`, an `EXIT` trap) — not a hardcoded `-1`, so a player's single-core preference also survives. It **no longer writes `autoexec.cfg`** at all (the `+mat_queue_mode 0` launch arg covers that single run).
+> - If a `--wined3d` run is hard-killed before the trap fires, the sidecar survives; the next launch's `assert_max_settings` **self-heals** `mat_queue_mode` from it (and removes any launcher-written landmine `autoexec.cfg`). This replaced the old "re-assert `-1` every launch" mechanism, which would clobber a player's deliberate choice (see [C2, revised](08-roadmap.md#c2-single-source-of-truth-for-settings)).
 
 **Also fixed (C2).** The launcher comment block at `play-l4d2.sh` ~74–93 was **stale/contradictory** — it claimed "MSAA off / queue 0 was the verified-clean set" and pushed the debunked `mat_hdr_level 1→2` HDR theory while `DEFAULT_GAME_ARGS` actually sets MSAA 4 + queue −1. The comments now describe the real args (`mat_hdr_level` is a documented no-op in this retail build; HDR is decided by hardware caps, not these args).
 
@@ -148,8 +148,9 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
   the `$HOME` default Steam library (first existing wins), and `play-l4d2.sh` passes the resolved path to the
   helper at launch. Helper rebuilt clean. ([D1](08-roadmap.md#d1-de-hardcode-the-steam-dylib-path-must-fix))
 - ~~**Hardcoded resolution.**~~ **RESOLVED.** `video.txt` is no longer pinned to 1512×982 —
-  `detect_resolution()` (`L4D2_RES` override → AppKit `NSScreen` → `system_profiler`) feeds
-  `defaultres`/`defaultresheight`, re-asserted every launch; windowed-borderless preserved.
+  `detect_resolution()` (`L4D2_RES` override → AppKit `NSScreen` → `system_profiler`) **seeds**
+  `defaultres`/`defaultresheight` on first run; a player's in-game resolution change then **persists**
+  (see [C2, revised](08-roadmap.md#c2-single-source-of-truth-for-settings)); windowed-borderless preserved.
   ([D2](08-roadmap.md#d2-dynamic-resolution))
 
 **Already portable (good) + now preflighted (D3–D6, 2026-06-04):** the bridge pulls **real SteamID /
