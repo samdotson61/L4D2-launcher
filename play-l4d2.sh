@@ -84,13 +84,18 @@ STEAM_ARGS=(-no-cef-sandbox)
 #   (4× MSAA, multicore, aniso, gpu_level, dxlevel, resolution) is seeded into video.txt,
 #   which LATCHES and overrides these launch args, so a player's saved video.txt values
 #   win over +mat_antialias / +mat_queue_mode here (those persist correctly).
-#   What's pinned by these args: 4× MSAA (mat_antialias 4) and multicore (mat_queue_mode
-#   -1) — both inert once video.txt holds them — plus the three ConVar-only quality
-#   settings with NO video.txt key, which therefore stay launcher-defaulted and do not
-#   yet persist: full textures (mat_picmip 0), expensive water (r_waterforceexpensive 1),
-#   render-to-texture shadows (r_shadowrendertotexture 1).  Resolution comes from the
-#   display's detected logical value (D2; 1512×982 on this 14" MBP, overridable via
-#   L4D2_RES) and is seeded to video.txt, where it now persists.
+#   What's still passed here: 4× MSAA (mat_antialias 4) and multicore (mat_queue_mode -1)
+#   — both inert once video.txt holds them (it latches over launch args), so they're just
+#   a fallback default; the player's video.txt values win and persist.  The old three
+#   ConVar-only quality pins (mat_picmip 0 / r_waterforceexpensive 1 /
+#   r_shadowrendertotexture 1) were REMOVED 2026-06-04: they have no video.txt key, so
+#   forcing them every launch OVERRODE the player's menu detail choices and couldn't
+#   persist anyway (they're not FCVAR_ARCHIVE).  They merely DUPLICATED gpu_level 3 /
+#   gpu_mem_level 2 (L4D2's own "very high" preset carries none of them), so dropping them
+#   lets the persisted video.txt detail levels drive texture/water/shadow quality — real
+#   per-environment adaptation.  Resolution comes from the display's detected logical value
+#   (D2; 1512×982 on this 14" MBP, overridable via L4D2_RES) and is seeded to video.txt,
+#   where it now persists.
 #
 #   *** HDR "flat / blown-out / no baked shadows": RENDERING SOLVED 2026-06-03 ***
 #   The cause was THIS launcher.  A `+mat_hdr_level 1` token used to live in this
@@ -123,7 +128,7 @@ STEAM_ARGS=(-no-cef-sandbox)
 #   value on exit; it is never persisted to autoexec.cfg any more.
 #   +r_flashlightdepthtexture 1: dynamic flashlight shadows ON (same queued-arg
 #   mechanism; confirmed working).  Replaced the old `0` stopgap.
-DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4)
+DEFAULT_GAME_ARGS=(-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_antialias 4)
 
 # ─── Pretty output ────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -750,9 +755,10 @@ detect_resolution() {
 #
 # video.txt LATCHES at material-system init and overrides config.cfg / autoexec / launch
 # args, so a player's value here beats the (now inert) +mat_antialias / +mat_queue_mode
-# launch args in DEFAULT_GAME_ARGS — those settings persist correctly.  (The ConVar-only
-# quality pins mat_picmip / r_waterforceexpensive / r_shadowrendertotexture have no
-# video.txt key and are still passed every launch; see the DEFAULT_GAME_ARGS note.)
+# launch args in DEFAULT_GAME_ARGS — those settings persist correctly.  (The old ConVar-only
+# quality pins mat_picmip / r_waterforceexpensive / r_shadowrendertotexture were removed
+# 2026-06-04 — they duplicated gpu_level 3 / gpu_mem_level 2, which are seeded here and now
+# drive texture/water/shadow quality; see the DEFAULT_GAME_ARGS note.)
 #
 # Also self-heals a hard-killed --wined3d run: that path leaves a .wined3d-mqm-restore
 # sidecar holding the pre-run mat_queue_mode.  If it's still here, the prior run died
@@ -789,10 +795,13 @@ assert_max_settings() {
   local seed_all=0
   [[ "$first_run" == 1 || "${FORCE_MAX:-0}" == 1 ]] && seed_all=1
 
-  # The recommended max baseline.  dxlevel 95 keeps the engine ≥ DX9 so the default has
-  # HDR on; a player may lower it to adapt (HDR then turns off — an accepted tradeoff).
-  local -a keys=(gpu_level mat_antialias mat_forceaniso mat_queue_mode dxlevel)
-  local -a vals=(3         4             16             -1             95)
+  # The recommended max baseline (= L4D2's own "very high" detail levels: gpu_level 3,
+  # gpu_mem_level 2 textures, cpu_level 2, mem_level 2 — these drive texture/water/shadow
+  # quality now that the launcher no longer force-pins those convars). dxlevel 95 keeps the
+  # engine ≥ DX9 so the default has HDR on; a player may lower any of these to adapt
+  # (lowering dxlevel turns HDR off — an accepted tradeoff).
+  local -a keys=(gpu_level gpu_mem_level cpu_level mem_level mat_antialias mat_forceaniso mat_queue_mode dxlevel)
+  local -a vals=(3         2             2         2         4             16             -1             95)
   local i k v
   for i in "${!keys[@]}"; do
     k="${keys[$i]}"; v="${vals[$i]}"
@@ -1034,14 +1043,27 @@ do_launch() {
     ok "  • gpu-faults.log   — ${_nf} kernel AGX/IOGPU fault lines (the real 0x010c reason)"
     exit 0
   fi
-  exec env ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
+  # Run the game as a TRACKED background job (not `exec`) so control returns here when it
+  # exits — via the in-game "Exit Game", a quit, or a crash — and we reap the steam_helper
+  # + wineserver we started. With the old `exec`, the launcher process was REPLACED by
+  # wine, so the detached helper lingered after the game quit ("never fully quit", had to
+  # --kill by hand). Ctrl-C routes through the trap to force-kill the whole wine tree.
+  # (Letting the game exit cleanly also lets Source flush video.txt/config.cfg, which is
+  # how player setting changes persist.)
+  env ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
     ${dyld_env[@]+"${dyld_env[@]}"} \
     "${mvk_env[@]}" \
     ${dxvk_env[@]+"${dxvk_env[@]}"} \
     WINEPREFIX="$PREFIX_DIR" \
     WINEESYNC=1 \
     WINEDEBUG=-all \
-    "$WINE64" "$WIN_EXE" "${DEFAULT_GAME_ARGS[@]}" ${GAME_ARGS[@]+"${GAME_ARGS[@]}"}
+    "$WINE64" "$WIN_EXE" "${DEFAULT_GAME_ARGS[@]}" ${GAME_ARGS[@]+"${GAME_ARGS[@]}"} &
+  local _game_pid=$!
+  trap 'echo; warn "Interrupted — force-killing the wine tree…"; do_kill; exit 130' INT TERM
+  wait "$_game_pid" 2>/dev/null || warn "game process exited non-zero"
+  trap - INT TERM
+  say "Game exited — cleaning up helper + wineserver…"
+  do_kill
 }
 
 # ─── Goldberg Steam emulator install ──────────────────────────────────────────

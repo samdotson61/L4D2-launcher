@@ -293,10 +293,12 @@ Full list with cause/workaround/status: [03 — Known issues](https://github.com
   blacklisted because firing it currently hangs). This is **Phase 2**.
 - **Player settings persist (policy revised 2026-06-04).** Max settings is the **first-run default**, not a
   per-launch override: the launcher *seeds* the max baseline into `video.txt`, then **never overwrites a value
-  the player changed** in-game — resolution, MSAA, aniso, detail, multicore, vsync all persist across restarts
-  (run `--max-settings` to deliberately reset to max). Three ConVar-only quality pins
-  (`mat_picmip` / `r_waterforceexpensive` / `r_shadowrendertotexture`) are the one boundary — still launch-arg
-  forced. See [05-usage.md](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/05-usage.md#game-graphics-settings).
+  the player changed** in-game — resolution, MSAA, aniso, detail/texture levels (`gpu_level`/`gpu_mem_level`),
+  multicore, vsync all persist across restarts (run `--max-settings` to deliberately reset to max). The three
+  ConVar-only quality pins (`mat_picmip` / `r_waterforceexpensive` / `r_shadowrendertotexture`) that used to
+  override texture/water/shadow quality were **removed** — they duplicated the detail levels and couldn't
+  persist anyway, so all Options → Video settings now persist. See
+  [05-usage.md](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/05-usage.md#game-graphics-settings).
 - **Multicore landmine — fixed (Phase 1 / C1+C2).** The `--wined3d` path used to persist `mat_queue_mode 0`
   (via `autoexec.cfg` + a `video.txt` rewrite) into the DXVK path. Now it scopes serialisation to that one
   run, saving the pre-run `mat_queue_mode` to a sidecar and restoring **that** value on exit (self-healing on

@@ -33,7 +33,7 @@ The shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-
 
 | Reality check | State |
 |---|---|
-| `git HEAD` | `9a5dedf` — *"working and playable my boy"* (HDR-playability milestone committed 2026-06-04; supersedes `8cdc8ca` "working dx8 no tonemapping") |
+| `git HEAD` | `619cbd5` — *"docs and settings persistence update"* (2026-06-04; player settings now persist — see [C2](#c2-single-source-of-truth-for-settings)). Run `git log --oneline` for the live tip; full milestone lineage is in [01-current-state.md](01-current-state.md). |
 | In-game shading | **Full DX9.5 (`mat_dxlevel 100`), HDR playable (`mat_hdr_level 2`)** — proper HDR shading at max settings, **playable end-to-end** *(rendering fixed 2026-06-03, playability fixed 2026-06-04 — the `0x010c` device-lost is solved, see [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) + [A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04))* |
 | Multiplayer | **Not working** — bridge plumbing exists, but the engine is never put into Steam "online mode" |
 | `video.txt` dxlevel | Launcher **seeds** `setting.dxlevel 95` as the first-run default (C2, revised 2026-06-04); a player may change it (HDR needs ≥ DX9). `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
@@ -49,7 +49,7 @@ The shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-
 >
 > **Real root cause (of the flat lighting):** the launcher's own `DEFAULT_GAME_ARGS` passed `+mat_hdr_level 1` (and `+mat_hdr_level 2`). The engine logs `Unknown command "mat_hdr_level"` for these — but it is **not** a no-op: the engine **queues** the unknown convar and applies it the instant `mat_hdr_level` registers during material-system init, **pinning HDR to level 1 (LDR+bloom)** every launch. At level 1 on L4D2's HDR-only maps, the engine reads the empty LDR lighting lump, logs `Level unlit, setting 'mat_fullbright 1'`, and renders fullbright — the exact flat/over-bright/no-baked-shadow symptom.
 >
-> **The fix (for rendering):** **delete** both `+mat_hdr_level` tokens from `DEFAULT_GAME_ARGS`. There was nothing to *add* — the fix is the **absence** of the bad token. The engine's true hardware-derived default (level 2, full HDR) then stands. `DEFAULT_GAME_ARGS` is now `-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4`.
+> **The fix (for rendering):** **delete** both `+mat_hdr_level` tokens from `DEFAULT_GAME_ARGS`. There was nothing to *add* — the fix is the **absence** of the bad token. The engine's true hardware-derived default (level 2, full HDR) then stands. `DEFAULT_GAME_ARGS` is now `-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_antialias 4` (the `+mat_picmip` / `+r_waterforceexpensive` / `+r_shadowrendertotexture` quality pins were later removed 2026-06-04 — see [C2](#c2-single-source-of-truth-for-settings)).
 >
 > **Verified:** a VScript probe (`Convars.GetFloat`) reads `mat_hdr_level=2` after removal (was `1` with the args); `Level unlit` is gone; `mat_fullbright` is no longer force-set; `mat_dxlevel` reads `100` (full DX9.5). Full HDR renders and **coexists** with 4× MSAA and `mat_queue_mode -1`.
 >
@@ -199,9 +199,12 @@ VideoConfig half of the max baseline in `video.txt` — `gpu_level 3`, `mat_anti
 > max default for a key the player/engine hasn't written, but **never overwrite a value already present**.
 > `video.txt` latches at material-system init and overrides launch args, so a player's saved value beats the
 > (now inert) `+mat_antialias`/`+mat_queue_mode` args in `DEFAULT_GAME_ARGS` — those settings persist. `L4D2_RES`
-> stays an explicit per-launch resolution override. The three ConVar-only quality pins (`mat_picmip 0`,
-> `r_waterforceexpensive 1`, `r_shadowrendertotexture 1`) have no `video.txt` key and are still passed every
-> launch, so they remain launcher-defaulted (not yet player-persistable) — a known boundary, see
+> stays an explicit per-launch resolution override. The seeded baseline includes the detail levels that drive
+> texture/water/shadow quality (`gpu_level 3`, `gpu_mem_level 2`, `cpu_level 2`, `mem_level 2` — L4D2's "very
+> high"). The three ConVar-only quality pins (`mat_picmip 0` / `r_waterforceexpensive 1` /
+> `r_shadowrendertotexture 1`) were **removed from `DEFAULT_GAME_ARGS` 2026-06-04** — they duplicated those
+> levels and, lacking a `video.txt` key, both overrode the player's menu choices and couldn't persist (not
+> `FCVAR_ARCHIVE`); quality now follows the persisted detail levels. See
 > [05-usage.md](05-usage.md#game-graphics-settings).
 
 The ConVar-only settings (picmip 0, expensive water, RTT shadows) ride in `DEFAULT_GAME_ARGS`. The stale

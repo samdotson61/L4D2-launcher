@@ -50,7 +50,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `L4D2_MVK_MAB` | Metal Argument Buffers: `0`/`1`/`2`(auto) — default 0 |
 | `L4D2_MVK_RESUME` | `MVK_CONFIG_RESUME_LOST_DEVICE` 0/1 — default 0 (halt on real fault) |
 | `L4D2_MVK_PREFILL` | Command-buffer encoding: `0` deferred (fast, default) … `2`/`3` immediate (raises crash threshold, slow) |
-| `L4D2_MVK_MTLHEAP` | `MVK_CONFIG_USE_MTLHEAP` 0/1 — default 1 *(only in the stashed launcher edits)* |
+| `L4D2_MVK_MTLHEAP` | `MVK_CONFIG_USE_MTLHEAP` 0/1 — default 1 (heaps; `0` = per-resource, a diagnostic knob) |
 | ~~`L4D2_FORCE_HDR`~~ | **REMOVED 2026-06-03.** Re-asserted `dxlevel 95` in video.txt on launch — based on the debunked "dxlevel/DXVK gates HDR" theory. HDR was never gated by dxlevel (engine already runs `mat_dxlevel 100`); it was pinned off by a launch arg, since fixed. See [03-known-issues #1](03-known-issues.md). |
 | `L4D2_WINEDEBUG` | Override Wine debug flags |
 | `WINED3D_RENDERER` | `vulkan` / `gl` for the `--wined3d` path |
@@ -60,19 +60,19 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 ## Default launch args
 
 ```
--novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_picmip 0
-+r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4
+-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_antialias 4
 ```
 - `-vulkan` routes D3D9 through DXVK (without it the game exits in seconds).
 - `+r_flashlightdepthtexture 1` — dynamic flashlight shadows **on** (was the old `0` stopgap; confirmed working — issue #3).
-- `+mat_queue_mode -1` multicore, `+mat_antialias 4` 4× MSAA, `+mat_picmip 0` max textures, `+r_waterforceexpensive 1`, `+r_shadowrendertotexture 1` — max settings.
+- `+mat_queue_mode -1` (multicore) and `+mat_antialias 4` (4× MSAA) are **inert defaults** — `video.txt` latches over them, so the player's saved values win and persist. They're kept only as a fallback if `video.txt` lacks those keys.
+- **Removed 2026-06-04:** `+mat_picmip 0` / `+r_waterforceexpensive 1` / `+r_shadowrendertotexture 1`. They duplicated `gpu_level 3` / `gpu_mem_level 2` (L4D2's "very high" preset carries none of them) and, having no `video.txt` key, *overrode* the player's menu detail choices while being unable to persist (not `FCVAR_ARCHIVE`). Dropping them lets the persisted `video.txt` detail levels drive texture/water/shadow quality — see the boundary note below.
 - **No `+mat_hdr_level` token.** Both `+mat_hdr_level 1` and `+mat_hdr_level 2` were **removed 2026-06-03**. They were *not* harmless no-ops: although the engine logs `Unknown command "mat_hdr_level"`, it **queues** the unknown convar and applies it the instant `mat_hdr_level` registers during material-system init — pinning HDR to level 1 (LDR+bloom) every launch, which forced the flat/fullbright look. With the token gone, the engine's true hardware-derived default (level 2, full HDR) stands. See [03-known-issues #1](03-known-issues.md).
 
 ## Game graphics settings
 
 Live in `left4dead2/cfg/video.txt` (resolution, MSAA, aniso, multicore, gpu_level, dxlevel) and the dxsupport files. **Max settings is the DEFAULT, and the player is in control** *(policy revised 2026-06-04)*: the launcher seeds the recommended max baseline (**4× MSAA + multicore + max textures + DX9.5** + this Mac's detected resolution) on the **first run**, and any setting you then change in the in-game **Options → Video** menu **takes effect and persists across restarts** — so you can adapt to a different Mac/display. `assert_max_settings` enforces this with **seed-not-overwrite**: it writes the full baseline only on the first launcher run (no `video.txt.orig-pre-launcher` snapshot yet) or on explicit **`--max-settings`**, and otherwise only fills in a default for a key you haven't set — it **never** overwrites a value already present. (`video.txt` latches at material-system init and overrides launch args, so your saved values win over the `+mat_antialias` / `+mat_queue_mode` launch args — those persist.) `L4D2_RES` remains an explicit per-launch resolution override. See [Phase 1 / C2](08-roadmap.md#c2-single-source-of-truth-for-settings) and the binding constraint in [08-roadmap.md](08-roadmap.md).
 
-> **Known boundary — three settings don't persist yet.** The ConVar-only quality pins `mat_picmip 0` (max textures), `r_waterforceexpensive 1` (expensive water), and `r_shadowrendertotexture 1` (RTT shadows) have **no `video.txt` key**, so they ride in `DEFAULT_GAME_ARGS` and are re-applied every launch — a change to these from the console/config won't survive a restart. Everything in **Options → Video** (resolution, MSAA, anisotropic filtering, detail/effect/shader levels via `gpu_level`, multicore, vsync) **does** persist. Making those three player-persistable is a possible follow-up.
+> **All Options → Video settings persist** *(boundary closed 2026-06-04)*. Resolution, MSAA, anisotropic filtering, detail/effect/shader/texture levels (`gpu_level` / `gpu_mem_level` / `cpu_level` / `mem_level`), multicore, and vsync all live in `video.txt` and persist across restarts. The three ConVar-only quality pins that used to override texture/water/shadow quality (`mat_picmip` / `r_waterforceexpensive` / `r_shadowrendertotexture`) were **removed** from `DEFAULT_GAME_ARGS` — they duplicated the detail levels and couldn't persist anyway (not `FCVAR_ARCHIVE`), so those aspects now follow the persisted `gpu_level` / `gpu_mem_level`. The seeded baseline matches L4D2's own "very high" preset (the launcher seeds 4× MSAA rather than the preset's 8× — bump it in-menu and it persists).
 
 The `--wined3d` path serialises D3D9 for its own run only and no longer leaks `mat_queue_mode 0` into the DXVK path ([issue #9](03-known-issues.md), resolved in C1).
 

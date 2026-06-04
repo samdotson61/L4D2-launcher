@@ -47,16 +47,15 @@ The game **launches, reaches the main menu, and loads into a campaign**, renderi
 
 ### Launch args (`play-l4d2.sh` → `DEFAULT_GAME_ARGS`)
 ```
--novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1
-+mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4
+-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_antialias 4
 ```
-**The `+mat_hdr_level 1` / `+mat_hdr_level 2` tokens were REMOVED 2026-06-03 — they were the HDR bug.** Despite logging `Unknown command`, the engine *queues* `+mat_hdr_level 1` and applies it once the convar registers at material-system init, pinning HDR to level 1 (LDR+bloom) → fullbright on HDR-only maps. Their **absence** is what enables HDR (engine default = level 2). `+r_flashlightdepthtexture 1` (was `0`) restores dynamic flashlight shadows.
+**The `+mat_hdr_level 1` / `+mat_hdr_level 2` tokens were REMOVED 2026-06-03 — they were the HDR bug.** Despite logging `Unknown command`, the engine *queues* `+mat_hdr_level 1` and applies it once the convar registers at material-system init, pinning HDR to level 1 (LDR+bloom) → fullbright on HDR-only maps. Their **absence** is what enables HDR (engine default = level 2). `+r_flashlightdepthtexture 1` (was `0`) restores dynamic flashlight shadows. **The `+mat_picmip 0` / `+r_waterforceexpensive 1` / `+r_shadowrendertotexture 1` quality pins were REMOVED 2026-06-04** — they duplicated `gpu_level 3` / `gpu_mem_level 2` (now seeded in `video.txt`) and, lacking a `video.txt` key, overrode the player's menu detail choices while being unable to persist (not `FCVAR_ARCHIVE`); texture/water/shadow quality now follows the persisted detail levels. `+mat_queue_mode -1` / `+mat_antialias 4` remain only as inert fallbacks (`video.txt` latches over them).
 
 ### `video.txt` (`left4dead2/cfg/video.txt`) — **live contents (2026-06-02)**
 ```
 gpu_level 3, cpu_level 2, gpu_mem_level 2, mem_level 2
 mat_antialias 4 (4× MSAA), mat_aaquality 0, mat_forceaniso 16
-mat_queue_mode -1 (multicore), mat_picmip 0
+mat_queue_mode -1 (multicore)
 mat_vsync 1, mat_triplebuffered 1, mat_monitorgamma 2.2
 defaultres 1512 × 982, windowed (fullscreen 0), no border (nowindowborder 1)
 ```
