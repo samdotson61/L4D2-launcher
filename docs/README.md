@@ -21,7 +21,7 @@ turnkey installer.
 
 ## Status at a glance
 
-Current baseline: `git HEAD 8cdc8ca` + the **2026-06-03 HDR-rendering fix** and the **2026-06-04 HDR-playability fix** (HDR now renders **and is playable** at max settings — see the HDR row; the *"working dx8 no tonemapping"* HEAD label predates both fixes).
+Current baseline: `git HEAD 9a5dedf` (*"working and playable my boy"*, committed 2026-06-04) — the **2026-06-03 HDR-rendering fix** and the **2026-06-04 HDR-playability fix** are now committed; HDR renders **and is playable** at max settings (see the HDR row).
 
 | Aspect | State |
 |---|---|
@@ -32,7 +32,7 @@ Current baseline: `git HEAD 8cdc8ca` + the **2026-06-03 HDR-rendering fix** and 
 | **HDR / tonemapping + DX9 shading** | **Playable** — rendering fixed 2026-06-03 (was our own `+mat_hdr_level 1` pin; removed → engine default = full HDR, at DX9.5 `mat_dxlevel 100`); **playability fixed 2026-06-04** — the `0x010c` device-lost was an **attachment-less render pass** (a 16384×16384 pass with zero attachments hard-aborts the AGX GPU), now skipped in patched MoltenVK. User played levels 1→2 with no freeze/crash; 0 faults in 150 s runs. Only residual: an occasional stutter ([issue #5](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). ([issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)) |
 | Flashlight shadow | On (`r_flashlightdepthtexture 1`) — dynamic shadows render |
 | **Online / multiplayer** | **Not working** — bridge plumbing present, but the engine is never put into Steam "online mode" → [Phase 2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
-| **Portability (any Apple Silicon Mac)** | Goal — close, but a hardcoded dylib path + resolution block it → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
+| **Portability (any Apple Silicon Mac)** | Goal — the two per-machine blockers (hardcoded dylib path + resolution) are now **fixed** (D1/D2, 2026-06-04); remaining Phase 3 work is first-run UX + cross-Mac validation → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
 
 ## The stack
 
@@ -294,8 +294,9 @@ Full list with cause/workaround/status: [03 — Known issues](https://github.com
   (via `autoexec.cfg` + a `video.txt` rewrite) into the DXVK path. Now it scopes serialisation to that one
   run and reverts on exit, and every DXVK launch re-asserts the max-settings block in `video.txt` (incl.
   `mat_queue_mode -1`, `dxlevel 95`) and strips any stale landmine `autoexec.cfg`.
-- **`bridge/steam_helper.c` hardcodes `DYLIB_PATH`** to a specific user's Steam install — a portability
-  blocker (**Phase 3**); change it (or the symlink) for a different machine until then.
+- **`bridge/steam_helper.c` no longer hardcodes the Steam dylib path** (D1, 2026-06-04) — `resolve_dylib_path()`
+  derives it from `$L4D2_STEAM_DYLIB` → `$L4D2_GAME_DIR/bin/libsteam_api.dylib` → the `$HOME` default Steam
+  library, and the launcher passes the resolved path to the helper.
 - **`--wined3d` renders cleaner but crashes after a few minutes** (access violation in the Apple OpenGL →
   Metal layer) and is slower. DXVK is the primary path.
 - **The game-DLL byte patches are build-9477-specific** and will silently stop applying on any L4D2 update

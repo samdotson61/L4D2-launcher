@@ -77,7 +77,8 @@ STEAM_ARGS=(-no-cef-sandbox)
 #   two must agree, and do.  What's actually maxed here: full textures
 #   (mat_picmip 0), expensive water (r_waterforceexpensive 1), render-to-texture
 #   shadows (r_shadowrendertotexture 1), 4× MSAA (mat_antialias 4) and multicore
-#   (mat_queue_mode -1) — all at native 1512x982.
+#   (mat_queue_mode -1) — at the display's detected logical resolution (D2;
+#   1512×982 on this 14" MBP, auto-detected elsewhere, overridable via L4D2_RES).
 #
 #   *** HDR "flat / blown-out / no baked shadows": RENDERING SOLVED 2026-06-03 ***
 #   The cause was THIS launcher.  A `+mat_hdr_level 1` token used to live in this
@@ -192,6 +193,10 @@ Env overrides:
                   (default: ~/Library/Application Support/Steam/steamapps/common/Left 4 Dead 2)
   L4D2_PREFIX     Path to the Wine prefix
                   (default: ~/L4D2-launcher/prefix)
+  L4D2_STEAM_DYLIB  Path to libsteam_api.dylib for the native helper
+                  (default: $L4D2_GAME_DIR/bin/libsteam_api.dylib)
+  L4D2_RES        Force the in-game resolution as WxH, e.g. 1920x1080
+                  (default: the main display's detected logical resolution)
 EOF
 }
 
@@ -590,6 +595,41 @@ do_shell() {
     exec "${SHELL:-/bin/zsh}"
 }
 
+# D2 — detect the main display's LOGICAL resolution in points: the value Source's
+# windowed-borderless mode wants in video.txt (defaultres/defaultresheight).  This
+# 14" MBP reports 1512×982 logical over a 3024×1964 backing panel; another Mac gets
+# its own.  We deliberately use LOGICAL, not backing, res — 1512×982 is the proven-
+# playable value and the borderless window is sized in points; writing the 3024×1964
+# backing would 4× the pixel load on a build we just got stable.  Override with
+# L4D2_RES="WxH" (e.g. 1920x1080).  Detection order: explicit env → AppKit NSScreen
+# via osascript (in-process, no Finder-automation prompt) → system_profiler (native
+# ÷2 for a Retina panel).  Echoes "W H"; non-zero exit if nothing worked.
+detect_resolution() {
+  # 1) explicit override
+  if [[ -n "${L4D2_RES:-}" ]]; then
+    if [[ "$L4D2_RES" =~ ^([0-9]+)[xX]([0-9]+)$ ]]; then
+      printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"; return 0
+    fi
+    warn "Ignoring malformed L4D2_RES='$L4D2_RES' (want e.g. 1920x1080)"
+  fi
+  # 2) AppKit NSScreen — logical points of the main display, no extra permissions.
+  local r
+  r=$(osascript -l JavaScript -e \
+        'ObjC.import("AppKit"); var f=$.NSScreen.mainScreen.frame; Math.round(f.size.width)+" "+Math.round(f.size.height)' \
+        2>/dev/null) || true
+  if [[ "$r" =~ ^[0-9]+\ [0-9]+$ ]]; then printf '%s\n' "$r"; return 0; fi
+  # 3) system_profiler fallback: main display's native res, halved for a Retina
+  #    panel (the default 2× scale → logical points).
+  local line w h
+  line=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -m1 -iE 'resolution:') || true
+  if [[ "$line" =~ ([0-9]+)[[:space:]]*x[[:space:]]*([0-9]+) ]]; then
+    w="${BASH_REMATCH[1]}"; h="${BASH_REMATCH[2]}"
+    if [[ "$line" == *Retina* ]]; then w=$(( w / 2 )); h=$(( h / 2 )); fi
+    printf '%s %s\n' "$w" "$h"; return 0
+  fi
+  return 1
+}
+
 # C2 — single source of truth for graphics settings.  Idempotently re-assert the
 # max-settings VideoConfig block into video.txt on every launch so nothing (a
 # Steam update / "verify integrity", the in-game options menu, or a prior
@@ -619,6 +659,18 @@ assert_max_settings() {
     local mode="max settings (4× MSAA · multicore · HDR on)"
     local -a keys=(gpu_level mat_antialias mat_forceaniso mat_queue_mode dxlevel)
     local -a vals=(3         4             16             -1             95)
+    # D2 — assert this Mac's detected logical resolution too (no longer hardcoded
+    # to 1512×982).  windowed-borderless (fullscreen 0 / nowindowborder 1) is left
+    # untouched.  On detection failure, leave defaultres as-is rather than guess.
+    local resnote="" res rw rh
+    if res=$(detect_resolution); then
+      rw="${res% *}"; rh="${res#* }"
+      keys+=(defaultres defaultresheight)
+      vals+=("$rw"      "$rh")
+      resnote=" · ${rw}×${rh}"
+    else
+      warn "Could not detect display resolution — leaving video.txt defaultres unchanged"
+    fi
     local i k v
     for i in "${!keys[@]}"; do
       k="${keys[$i]}"; v="${vals[$i]}"
@@ -630,7 +682,7 @@ assert_max_settings() {
         L4D2_K="$k" L4D2_V="$v" perl -i -pe 'print "\t\"setting.$ENV{L4D2_K}\"\t\t\"$ENV{L4D2_V}\"\n" if /^\}/' "$vid"
       fi
     done
-    ok "Asserted video.txt: $mode · 16× aniso · gpu_level 3 · dxlevel 95"
+    ok "Asserted video.txt: $mode · 16× aniso · gpu_level 3 · dxlevel 95${resnote}"
   else
     warn "video.txt not found ($vid) — skipping max-settings assertion"
   fi
@@ -1126,7 +1178,10 @@ do_start_helper() {
   fi
   # Try up to ~5 seconds for the helper's socket to come up. SO_REUSEADDR
   # is set, but the previous instance's TIME_WAIT can still briefly block.
-  (cd "$b" && ./steam_helper > "$LAUNCHER_DIR/helper.log" 2>&1 &)
+  # D1: hand the helper the dylib path resolved from GAME_DIR (honors
+  # L4D2_GAME_DIR) so it never falls back to a hardcoded home path.
+  ( cd "$b" && L4D2_STEAM_DYLIB="$GAME_DIR/bin/libsteam_api.dylib" \
+      ./steam_helper > "$LAUNCHER_DIR/helper.log" 2>&1 & )
   local tries=0
   while (( tries < 10 )); do
     if lsof -nP -iTCP:54550 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then

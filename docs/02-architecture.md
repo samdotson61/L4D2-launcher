@@ -58,10 +58,10 @@ This split is the core trick: the Windows game thinks it's talking to Steam; it'
 `dxvk_d3d9.dll` (built from DXVK 1.10.3 + `shadow-sampler-workaround.patch`) replaces the game's Direct3D 9. It's patched for MoltenVK's limitations (no geometry shader / cull distance, shadow-sampler aliasing, the pushConstSize bug, robustImageAccess2). The game runs with `-vulkan` so it routes D3D9 through this DLL.
 
 ### 4. MoltenVK (Vulkan → Metal)
-`libMoltenVK.dylib` (MoltenVK 1.4.1 + `null-descriptor-fallback.patch`) translates DXVK's Vulkan to Metal for the M4 Pro. The patch fixes Apple-GPU detection on the M4 Pro, provides null-descriptor fallbacks (avoiding deref-of-0 GPU faults), reserves push-constant slots, and adds the GPU-fault diagnostics used by `--diag`.
+`libMoltenVK.dylib` (MoltenVK 1.4.1 + the session patch `moltenvk-all-edits-latest.patch`, regenerated 2026-06-04) translates DXVK's Vulkan to Metal for the M4 Pro. The patch fixes Apple-GPU detection on the M4 Pro, provides null-descriptor fallbacks (avoiding deref-of-0 GPU faults), reserves push-constant slots, adds the GPU-fault diagnostics used by `--diag`, and carries the **attachment-less-skip `0x010c` HDR fix** (issue #2, solved 2026-06-04) — it supersedes the older `null-descriptor-fallback.patch`, whose fix it still includes.
 
 ### 5. The GPU
-Apple M4 Pro. The recurring villain is the heavy-frame `0x010c` command-buffer fault — a marginal load threshold the patches push under. See [03-known-issues.md](03-known-issues.md#2-heavy-scene-0x010c-gpu-fault-).
+Apple M4 Pro. The long-running villain was the `0x010c` command-buffer fault; under HDR it was root-caused (2026-06-04) to an **attachment-less render pass** and **solved** in MoltenVK (skip creating a Metal encoder for a zero-attachment pass), so HDR is now playable end-to-end. See [03-known-issues.md](03-known-issues.md#2-0x010c-device-lost-under-hdr--solved-2026-06-04-was-the-top-blocker-for-hdr-playability--41-62-64).
 
 ## Orchestration: `play-l4d2.sh`
 

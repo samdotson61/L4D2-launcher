@@ -6,7 +6,7 @@
 
 ## Playability summary
 
-The game **launches, reaches the main menu, and loads into a campaign**, rendering the world, HUD, weapons, survivor bots, and items. On the test map (`c1m1_hotel`) it runs at **~90–130 fps** at native **1512×982** with **max settings** (4× MSAA, multicore, max textures, expensive water, RTT shadows, 16× aniso) and **does not** hit the `0x010c` GPU crash during a ~90 s run.
+The game **launches, reaches the main menu, and loads into a campaign**, rendering the world, HUD, weapons, survivor bots, and items. On the test map (`c1m1_hotel`) it runs at **~90–130 fps** at **1512×982** (this Mac's logical resolution; now auto-detected per-Mac — D2) with **max settings** (4× MSAA, multicore, max textures, expensive water, RTT shadows, 16× aniso) and **does not** hit the `0x010c` GPU crash during a ~90 s run.
 
 **HDR is now PLAYABLE end-to-end at max settings** (issue #2 fixed 2026-06-04) — this is the **first truly playable HDR build**. HDR *rendering* was solved 2026-06-03 (the long "flat / over-bright / no baked shadows" problem was **our own launcher**: `DEFAULT_GAME_ARGS` passed `+mat_hdr_level 1`, which the engine logs as `Unknown command` but *queues and applies* at material-system init — pinning HDR to level 1 (LDR+bloom) every launch; on L4D2's HDR-only maps, level 1 reads the empty LDR lighting lump → `Level unlit, setting 'mat_fullbright 1'` → fullbright. **Removing that one token** lets the engine's true default — level 2, full HDR — stand). See [03-known-issues.md #1](03-known-issues.md#1-hdr--solved-2026-06-03).
 
@@ -67,9 +67,11 @@ defaultres 1512 × 982, windowed (fullscreen 0), no border (nowindowborder 1)
 > the `dxsupport.cfg` edits equally durable is the rest of
 > [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).
 >
-> **`defaultres 1512×982` is hardcoded to this 14" MacBook** (3024×1964 backing). Portability
-> ([plan D2](08-roadmap.md#d2-dynamic-resolution)) detects the target Mac's
-> resolution instead.
+> **`defaultres`/`defaultresheight` are now auto-detected per-Mac (D2, DONE 2026-06-04)** — no longer pinned
+> to this 14" MacBook's 1512×982. `assert_max_settings` writes the main display's **logical** resolution every
+> launch via `detect_resolution()` (`L4D2_RES` override → AppKit `NSScreen` → `system_profiler`); 1512×982 is
+> just this panel's value (3024×1964 backing). Windowed-borderless is unchanged. See
+> [plan D2](08-roadmap.md#d2-dynamic-resolution).
 >
 > **Multicore landmine fixed** ([C1](08-roadmap.md#c1-neutralise-the-multicore-landmine-must-fix) /
 > issue #9): `mat_queue_mode -1` is correct here and is re-asserted every launch. The `--wined3d` path no
@@ -94,23 +96,27 @@ MVK_CONFIG_FAST_MATH_ENABLED=0            (fast-math NaN/Inf in tonemap faults A
 
 ## Repository state (git)
 
-- **Branch:** `main`, **HEAD:** `8cdc8ca` (*"working dx8 no tonemapping no multiplayer"*) — the
-  prior baseline, on top of `38dc236` ("launcher: full HDR … loads into campaigns").
-  **Working tree carries the uncommitted 2026-06-03 HDR-rendering fix** (the one-line `DEFAULT_GAME_ARGS`
-  change + `L4D2_HDR`-toggle removal) **and the 2026-06-04 HDR-playability fix** (the patched
-  `libMoltenVK.dylib`'s attachment-less-skip `0x010c` fix, built from the regenerated session patch),
-  plus these doc updates — not yet committed.
+- **Branch:** `main`, **HEAD:** `9a5dedf` (*"working and playable my boy"*) — the HDR-playability
+  milestone, **committed 2026-06-04** (the 2026-06-03 HDR-rendering fix and the 2026-06-04 HDR-playability
+  fix are committed, not pending). The **working tree now carries the uncommitted D1/D2 portability fixes**
+  (de-hardcoded helper dylib path + dynamic resolution — see [08-roadmap.md](08-roadmap.md) D1/D2) plus the
+  matching doc updates. Recent lineage:
+  `9a5dedf` (playability — the attachment-less-skip `0x010c` fix) → `a540195` ("HDR rendering fix + full
+  `0x010c`-under-HDR diagnosis") → `458f9ff` ("flashlight shadows!!!") → `5e29d8d` ("A0"), on top of the
+  prior baseline `8cdc8ca` ("working dx8 no tonemapping no multiplayer") → `38dc236` ("launcher: full HDR …
+  loads into campaigns"). The patched `libMoltenVK.dylib`'s attachment-less-skip fix is carried by the
+  tracked session patch (the built dylib itself stays out of git — see below).
 - **`DEFAULT_GAME_ARGS`** carries **4× MSAA + multicore** (`mat_queue_mode -1`) + max textures.
-- **Stash:** `stash@{0}` (WIP on `38dc236`) holds in-progress launcher edits (clean-quit extended
+- **Stash:** `stash@{0}` (WIP on `38dc236`) still holds in-progress launcher edits (clean-quit extended
   to the normal launch path, an `L4D2_FORCE_HDR` video.txt toggle, `L4D2_MVK_MTLHEAP` override,
-  updated PREFILL comments).
+  updated PREFILL comments) — not yet applied.
 - **Not in git:** the patched `libMoltenVK.dylib` and `dxvk_d3d9.dll` binaries (rebuildable from
   source via `build-deps.sh` + the tracked `.patch` files); the game-folder config edits.
 
-> **Baseline caveat:** the `8cdc8ca` commit *label* ("working dx8 no tonemapping") is now stale —
-> with the 2026-06-03 HDR-rendering fix and the 2026-06-04 HDR-playability fix (both in the working
-> tree), HDR **renders and is playable** end-to-end at max settings and the engine runs **DX9.5**
-> (`mat_dxlevel 100`). What remains is **online multiplayer** and **portability to any Apple Silicon
+> **Baseline note:** as of `9a5dedf` the HEAD *label* ("working and playable my boy") is now **accurate** —
+> HDR **renders and is playable** end-to-end at max settings and the engine runs **DX9.5**
+> (`mat_dxlevel 100`). (The older `8cdc8ca` "working dx8 no tonemapping" label — now several commits back —
+> predated both fixes.) What remains is **online multiplayer** and **portability to any Apple Silicon
 > Mac** — see [08-roadmap.md](08-roadmap.md).
 
 > The `dxsupport.cfg` / `dxsupport_override.cfg` / `video.txt` edits live in the **Steam game folder**, not this repo. A Steam "verify integrity of game files" or game update will regenerate `bin/dxsupport.cfg` and silently revert the HDR-forcing edit. The launcher now re-asserts **`video.txt`** (incl. `mat_queue_mode -1` + `dxlevel 95`) on every launch via `assert_max_settings` ([C2](08-roadmap.md#c2-single-source-of-truth-for-settings)); making the **`dxsupport*.cfg`** edits equally durable is the rest of [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).

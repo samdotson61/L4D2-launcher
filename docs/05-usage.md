@@ -41,6 +41,8 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 |---|---|
 | `L4D2_GAME_DIR` | Override the L4D2 install path |
 | `L4D2_PREFIX` | Override the Wine prefix path |
+| `L4D2_STEAM_DYLIB` | Override the `libsteam_api.dylib` path the native helper loads (default: `$L4D2_GAME_DIR/bin/libsteam_api.dylib`) — D1 |
+| `L4D2_RES` | Force the in-game resolution as `WxH`, e.g. `1920x1080` (default: the main display's detected logical resolution) — D2 |
 | `L4D2_MVK_MAB` | Metal Argument Buffers: `0`/`1`/`2`(auto) — default 0 |
 | `L4D2_MVK_RESUME` | `MVK_CONFIG_RESUME_LOST_DEVICE` 0/1 — default 0 (halt on real fault) |
 | `L4D2_MVK_PREFILL` | Command-buffer encoding: `0` deferred (fast, default) … `2`/`3` immediate (raises crash threshold, slow) |
@@ -64,7 +66,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 
 ## Game graphics settings
 
-Live in `left4dead2/cfg/video.txt` (resolution, MSAA, multicore, gpu_level) and the dxsupport files. The user's max-settings preference (**4× MSAA + multicore + max textures + DX9.5**) is a **hard, non-negotiable constraint** and must be preserved — see [01-current-state.md](01-current-state.md). The DXVK path forces nothing down, and `assert_max_settings` now idempotently re-asserts the full max-settings block in `video.txt` on **every** launch (`mat_antialias 4`, `mat_queue_mode -1`, `mat_forceaniso 16`, `gpu_level 3`, `dxlevel 95`) — [Phase 1 / C2, done](08-roadmap.md#c2-single-source-of-truth-for-settings). The `--wined3d` path serialises D3D9 for its own run only and no longer leaks `mat_queue_mode 0` into the DXVK path ([issue #9](03-known-issues.md), resolved in C1).
+Live in `left4dead2/cfg/video.txt` (resolution, MSAA, multicore, gpu_level) and the dxsupport files. The user's max-settings preference (**4× MSAA + multicore + max textures + DX9.5**) is a **hard, non-negotiable constraint** and must be preserved — see [01-current-state.md](01-current-state.md). The DXVK path forces nothing down, and `assert_max_settings` now idempotently re-asserts the full max-settings block in `video.txt` on **every** launch (`mat_antialias 4`, `mat_queue_mode -1`, `mat_forceaniso 16`, `gpu_level 3`, `dxlevel 95`, plus this Mac's detected `defaultres`/`defaultresheight` — D2) — [Phase 1 / C2, done](08-roadmap.md#c2-single-source-of-truth-for-settings). The `--wined3d` path serialises D3D9 for its own run only and no longer leaks `mat_queue_mode 0` into the DXVK path ([issue #9](03-known-issues.md), resolved in C1).
 
 ## Signing in to Steam
 

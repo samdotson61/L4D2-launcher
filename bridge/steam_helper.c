@@ -24,13 +24,19 @@
 #include <signal.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
 #include <arpa/inet.h>
 #include <time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
 #define DEFAULT_PORT 54550
-#define DYLIB_PATH "/Users/samdotson/Library/Application Support/Steam/steamapps/common/Left 4 Dead 2/bin/libsteam_api.dylib"
+// The absolute path to libsteam_api.dylib is NOT hardcoded to one user any more.
+// resolve_dylib_path() derives it at startup (env → game dir → the default macOS
+// Steam library under $HOME) so the helper runs on any Mac.  See D1 in
+// docs/08-roadmap.md.
+#define DYLIB_REL_PATH   "/bin/libsteam_api.dylib"
+#define DEFAULT_L4D2_DIR "/Library/Application Support/Steam/steamapps/common/Left 4 Dead 2"
 
 // ─── Debug logging gate ──────────────────────────────────────────────────────
 // hlog() is the verbose per-op/per-callback trace; gated behind the
@@ -395,12 +401,54 @@ static void *load_sym(const char *name, int required) {
     return p;
 }
 
+// Resolve libsteam_api.dylib without hardcoding one user's $HOME.  Order
+// (first hit wins): L4D2_STEAM_DYLIB (explicit override, used verbatim) →
+// $L4D2_GAME_DIR/bin/libsteam_api.dylib → $HOME + the default Steam library.
+// Mirrors the launcher's GAME_DIR resolution, so a normal launch (play-l4d2.sh
+// exports L4D2_STEAM_DYLIB) and a standalone debug run both land correctly.
+// Returns a pointer into a static buffer.  See D1 in docs/08-roadmap.md.
+static const char *resolve_dylib_path(void) {
+    static char buf[PATH_MAX];
+
+    // 1) Explicit override — honored verbatim so the user can point anywhere
+    //    (a wrong value then surfaces as a clear dlopen error below).
+    const char *override = getenv("L4D2_STEAM_DYLIB");
+    if (override && override[0]) {
+        snprintf(buf, sizeof buf, "%s", override);
+        return buf;
+    }
+
+    // 2) Derived from the game dir the launcher resolved (honors L4D2_GAME_DIR).
+    const char *gamedir = getenv("L4D2_GAME_DIR");
+    if (gamedir && gamedir[0]) {
+        snprintf(buf, sizeof buf, "%s%s", gamedir, DYLIB_REL_PATH);
+        if (access(buf, R_OK) == 0) return buf;
+    }
+
+    // 3) Default macOS Steam library under $HOME.
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        snprintf(buf, sizeof buf, "%s%s%s", home, DEFAULT_L4D2_DIR, DYLIB_REL_PATH);
+        if (access(buf, R_OK) == 0) return buf;
+    }
+
+    // Nothing existed — return the $HOME default anyway so the dlopen error
+    // names a sensible location rather than an empty string.
+    if (home && home[0])
+        snprintf(buf, sizeof buf, "%s%s%s", home, DEFAULT_L4D2_DIR, DYLIB_REL_PATH);
+    else
+        snprintf(buf, sizeof buf, "%s", "." DYLIB_REL_PATH);
+    return buf;
+}
+
 static int load_steam(void) {
-    g_dylib = dlopen(DYLIB_PATH, RTLD_NOW | RTLD_LOCAL);
+    const char *dylib_path = resolve_dylib_path();
+    g_dylib = dlopen(dylib_path, RTLD_NOW | RTLD_LOCAL);
     if (!g_dylib) {
-        fprintf(stderr, "[helper] dlopen: %s\n", dlerror());
+        fprintf(stderr, "[helper] dlopen(%s): %s\n", dylib_path, dlerror());
         return -1;
     }
+    hlog("[helper] loaded steam dylib: %s\n", dylib_path);
 
     p_SteamAPI_Init           = load_sym("SteamAPI_Init", 1);
     p_SteamAPI_IsSteamRunning = load_sym("SteamAPI_IsSteamRunning", 0);

@@ -45,7 +45,7 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
 **The fix (the attachment-less-skip patch).** In MoltenVK's `MVKCommandEncoder::beginMetalRenderPass` (patched), when the render-pass descriptor has **no color/depth/stencil attachment**, **skip creating the render command encoder and return early**. `_mtlRenderEncoder` is already nil (cleared by `endCurrentMetalEncoding`), so any draws recorded into that pass become safe no-ops, and the next *real* render pass re-establishes encoder state normally. The fix is **DEFAULT ON** in the patched dylib; set `L4D2_MVK_SKIP_NOATT=0` to disable it (to reproduce/measure the fault).
 
 **Verification (2026-06-04, user-confirmed).**
-- HDR is **playable end-to-end at MAX settings** — 4× MSAA + multicore (`mat_queue_mode -1`) + native 1512×982, with `mat_hdr_level 2`, `mat_fullbright 0`, `mat_dxlevel 100`. The user **played through campaign level 1 and into level 2 with no freeze and no crash**.
+- HDR is **playable end-to-end at MAX settings** — 4× MSAA + multicore (`mat_queue_mode -1`) + 1512×982 (this Mac's logical res; auto-detected per-Mac since D2), with `mat_hdr_level 2`, `mat_fullbright 0`, `mat_dxlevel 100`. The user **played through campaign level 1 and into level 2 with no freeze and no crash**.
 - Automated: **0 `0x010c` faults** across repeated 150-second runs (versus faulting at ~39 s before the fix). **13,000+ attachment-less passes skipped per run** with no visual regression noticed.
 - An occasional **stutter** remains — a performance nit tracked under issue #5 ("60 fps not guaranteed"), **not a blocker**.
 
@@ -142,13 +142,15 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
 
 **Goal.** Port this wrapper to **any Apple Silicon Mac** and play L4D2 + join official Steam multiplayer by plugging in the real Steam values from that Mac's Steam app. See [Phase 3](08-roadmap.md#phase-3--portability-to-any-apple-silicon-mac).
 
-**Blockers found:**
-- **Hardcoded Steam dylib path.** `bridge/steam_helper.c:33` →
-  `DYLIB_PATH "/Users/samdotson/Library/.../Left 4 Dead 2/bin/libsteam_api.dylib"`. Must resolve
-  from `$L4D2_STEAM_DYLIB` / `$L4D2_GAME_DIR` / a search of common Steam locations, then rebuild
-  the helper. ([D1](08-roadmap.md#d1-de-hardcode-the-steam-dylib-path-must-fix))
-- **Hardcoded resolution.** `video.txt` pins `defaultres 1512×982` (this 14" MacBook). Detect the
-  target Mac's resolution at launch. ([D2](08-roadmap.md#d2-dynamic-resolution))
+**Blockers found — both RESOLVED 2026-06-04:**
+- ~~**Hardcoded Steam dylib path.**~~ **RESOLVED.** `bridge/steam_helper.c` no longer hardcodes the path;
+  `resolve_dylib_path()` resolves it from `$L4D2_STEAM_DYLIB` → `$L4D2_GAME_DIR/bin/libsteam_api.dylib` →
+  the `$HOME` default Steam library (first existing wins), and `play-l4d2.sh` passes the resolved path to the
+  helper at launch. Helper rebuilt clean. ([D1](08-roadmap.md#d1-de-hardcode-the-steam-dylib-path-must-fix))
+- ~~**Hardcoded resolution.**~~ **RESOLVED.** `video.txt` is no longer pinned to 1512×982 —
+  `detect_resolution()` (`L4D2_RES` override → AppKit `NSScreen` → `system_profiler`) feeds
+  `defaultres`/`defaultresheight`, re-asserted every launch; windowed-borderless preserved.
+  ([D2](08-roadmap.md#d2-dynamic-resolution))
 
 **Already portable (good):** the bridge pulls **real SteamID / persona / auth live from the running
 Mac Steam client** — no hardcoded SteamID. `vendorid 0x106b` + MoltenVK `isAppleGPU` (Apple1–10)

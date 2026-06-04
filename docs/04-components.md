@@ -14,9 +14,10 @@ Real Steam identity/auth (SteamID, persona, auth tickets) is read **live from th
 Steam client** — nothing about the account is hardcoded, which is what makes "plug in the real
 Steam values from this Mac's Steam app" work on any machine.
 
-> **Portability blocker:** the dylib *path* **is** hardcoded — `steam_helper.c:33`
-> `DYLIB_PATH "/Users/samdotson/Library/.../Left 4 Dead 2/bin/libsteam_api.dylib"`. To port to
-> another Mac this must be resolved dynamically. See [issue #10](03-known-issues.md#10-portability-blockers-per-machine-hardcoding--69-70--porting-goal)
+> **Portability (D1 — DONE 2026-06-04):** the dylib path is **no longer hardcoded**. `resolve_dylib_path()`
+> resolves it at startup from `$L4D2_STEAM_DYLIB` → `$L4D2_GAME_DIR/bin/libsteam_api.dylib` → the `$HOME`
+> default Steam library, and `play-l4d2.sh` passes the resolved path to the helper at launch. See
+> [issue #10](03-known-issues.md#10-portability-blockers-per-machine-hardcoding--69-70--porting-goal)
 > / [plan D1](08-roadmap.md#d1-de-hardcode-the-steam-dylib-path-must-fix).
 Wire format: `[u32 op][u32 arg_len][args] → [u32 status][u32 ret_len][return]`.
 

@@ -27,7 +27,7 @@ The shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-
 
 | Reality check | State |
 |---|---|
-| `git HEAD` | `8cdc8ca` — *"working dx8 no tonemapping no multiplayer"* |
+| `git HEAD` | `9a5dedf` — *"working and playable my boy"* (HDR-playability milestone committed 2026-06-04; supersedes `8cdc8ca` "working dx8 no tonemapping") |
 | In-game shading | **Full DX9.5 (`mat_dxlevel 100`), HDR playable (`mat_hdr_level 2`)** — proper HDR shading at max settings, **playable end-to-end** *(rendering fixed 2026-06-03, playability fixed 2026-06-04 — the `0x010c` device-lost is solved, see [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) + [A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04))* |
 | Multiplayer | **Not working** — bridge plumbing exists, but the engine is never put into Steam "online mode" |
 | `video.txt` dxlevel | Launcher now asserts `setting.dxlevel 95` on every launch (C2 ); `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
@@ -259,15 +259,28 @@ is **no hardcoded SteamID** (verified). `vendorid 0x106b` + MoltenVK `isAppleGPU
 M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` files via `build-deps.sh`.
 
 ### D1. De-hardcode the Steam dylib path (MUST-FIX)
-`bridge/steam_helper.c:33` hardcodes
-`DYLIB_PATH "/Users/samdotson/Library/.../Left 4 Dead 2/bin/libsteam_api.dylib"`. Resolve in order:
-`$L4D2_STEAM_DYLIB` env → `${L4D2_GAME_DIR:-default}/bin/libsteam_api.dylib` → search common Steam library
-locations. Rebuild the helper.
+> **DONE 2026-06-04.** The hardcoded `DYLIB_PATH` at `bridge/steam_helper.c:33` is gone — replaced by a
+> `resolve_dylib_path()` that resolves at startup: **`$L4D2_STEAM_DYLIB`** (explicit override, used verbatim)
+> → **`$L4D2_GAME_DIR/bin/libsteam_api.dylib`** → **`$HOME` + the default macOS Steam library**
+> (`…/steamapps/common/Left 4 Dead 2/bin/libsteam_api.dylib`); first existing wins, and a total miss still
+> dlopens the `$HOME` default so the error names a sensible path. `play-l4d2.sh` hands the helper its
+> already-resolved path (`L4D2_STEAM_DYLIB="$GAME_DIR/bin/libsteam_api.dylib"`, which honors `L4D2_GAME_DIR`)
+> at launch, so the normal path always lands correctly; the in-helper chain is the standalone-run safety net.
+> Helper rebuilt clean (`clang -arch arm64 -O2 -Wall`); the override and game-dir tiers were both verified to
+> resolve and to name their path on a dlopen miss. No more per-user path.
 
 ### D2. Dynamic resolution
-`video.txt` hardcodes **1512×982** (this 14" MacBook's logical res; the panel is 3024×1964 backing).
-Detect the target Mac's native/backing resolution at launch and write `defaultres`/`defaultresheight`
-accordingly. Keep windowed-borderless.
+> **DONE 2026-06-04.** `video.txt`'s resolution is no longer pinned to 1512×982. `play-l4d2.sh` gained
+> `detect_resolution()`, and `assert_max_settings` now asserts `defaultres`/`defaultresheight` from it every
+> launch (in-place update, no duplication; windowed-borderless `fullscreen 0` / `nowindowborder 1` left
+> untouched). Order: **`L4D2_RES="WxH"`** override → **AppKit `NSScreen.mainScreen.frame`** via in-process
+> `osascript` (no Finder-automation prompt) → **`system_profiler`** (native ÷2 for a Retina panel). It writes
+> the **logical** (point) resolution, *not* the 3024×1964 backing — 1512×982 is the proven-playable value,
+> the borderless window is sized in points, and writing backing pixels would 4× the GPU load on a freshly-
+> stabilised build. (The original "native/backing" wording is satisfied by logical res; the two differ only
+> by the Retina scale factor.) Verified across override / NSScreen / malformed-env cases and a dry-run
+> `video.txt` rewrite (1512×982 → 1920×1080, in place); on detection failure the launcher leaves `defaultres`
+> as-is rather than guess.
 
 ### D3. "Plug in real Steam values"
 The bridge already pulls **real SteamID / persona / auth** live from the running Mac Steam client. For a
