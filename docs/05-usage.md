@@ -18,6 +18,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `--bridge` | Build + install bridge + start helper (no launch) |
 | `--build-bridge` | Compile `steam_api.dll` + `steam_helper` only |
 | `--install-bridge` | Install bridge DLL + apply on-disk binary patches + copy `steam.dll`/`GameOverlayRenderer.dll` |
+| `--steam-check` | Verify the macOS Steam client is running + signed in, and show the persona/SteamID the bridge will authenticate as (D3) |
 | `--install-goldberg` / `--uninstall-goldberg` | Swap in/out the Goldberg shim (alternative to our bridge) |
 | `--install-steam` / `--steam` | Install / launch Steam-for-Windows in the prefix |
 | `--link-game` | Symlink an existing L4D2 install into the prefix's Steam library (avoid re-download) |
@@ -33,7 +34,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 
 ## Launch pipeline (what a plain run does, in order)
 
-`preflight` (macOS/arm64/Rosetta/game checks) → `ensure_gptk` (Whisky Wine 11) → `ensure_patched_moltenvk` (install + sign dylib) → `ensure_prefix` (wineboot) → `ensure_appid` (steam_appid.txt) → `do_install_bridge` (DLL + patches + dxvk.conf) → `do_start_helper` (helper on :54550) → `do_launch` (env + wine + game).
+`preflight` (macOS/arm64/Rosetta/game checks) → `ensure_gptk` (Whisky Wine 11) → `ensure_patched_moltenvk` (install + sign dylib) → `ensure_prefix` (wineboot) → `ensure_appid` (steam_appid.txt) → `mac_steam_preflight` + `gpu_preflight` (D3/D5 — Mac-Steam account + Apple-GPU checks) → `do_install_bridge` (DLL + patches + dxvk.conf) → `do_start_helper` (helper on :54550) → `do_launch` (env + wine + game).
 
 ## User-overridable environment variables
 
@@ -43,6 +44,8 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `L4D2_PREFIX` | Override the Wine prefix path |
 | `L4D2_STEAM_DYLIB` | Override the `libsteam_api.dylib` path the native helper loads (default: `$L4D2_GAME_DIR/bin/libsteam_api.dylib`) — D1 |
 | `L4D2_RES` | Force the in-game resolution as `WxH`, e.g. `1920x1080` (default: the main display's detected logical resolution) — D2 |
+| `L4D2_LAUNCHER_DIR` | Override the launcher/repo directory (default: auto-detected from the script's own location) — D4 |
+| `L4D2_MAC_STEAM_DIR` | Override the macOS Steam client dir for the D3 account check (default: `~/Library/Application Support/Steam`) — D3 |
 | `L4D2_MVK_MAB` | Metal Argument Buffers: `0`/`1`/`2`(auto) — default 0 |
 | `L4D2_MVK_RESUME` | `MVK_CONFIG_RESUME_LOST_DEVICE` 0/1 — default 0 (halt on real fault) |
 | `L4D2_MVK_PREFILL` | Command-buffer encoding: `0` deferred (fast, default) … `2`/`3` immediate (raises crash threshold, slow) |

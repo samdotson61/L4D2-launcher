@@ -283,23 +283,45 @@ M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` file
 > as-is rather than guess.
 
 ### D3. "Plug in real Steam values"
-The bridge already pulls **real SteamID / persona / auth** live from the running Mac Steam client. For a
-clean port the only host requirements are: Steam **installed + logged in + owns L4D2 (appid 550)**. Add a
-preflight that (a) verifies the Mac Steam client is running and logged in, (b) verifies `libsteam_api.dylib`
-exists, and (c) surfaces the **detected SteamID + persona** so the user confirms the right account. Optional
-explicit account/library override.
+> **DONE 2026-06-04.** `play-l4d2.sh` gained a Mac-Steam preflight (`mac_steam_preflight`), run on every
+> launch (in `do_launch`) and exposed standalone as **`--steam-check`**. It (a) checks the real macOS Steam
+> client (`steam_osx`) is running, (b) verifies `libsteam_api.dylib` exists — the path D1 resolves — and
+> **dies with guidance** if missing, and (c) parses the Mac client's `loginusers.vdf` to surface the
+> **PersonaName + AccountName + SteamID64** of the MostRecent account, so the user confirms the bridge will
+> authenticate as the right account before going online. Library override = `L4D2_GAME_DIR` /
+> `L4D2_STEAM_DYLIB`; the Steam dir is overridable via `L4D2_MAC_STEAM_DIR`. (Steam itself decides the active
+> *account*, so there's no account-override knob — the preflight surfaces it for confirmation instead.)
+> Verified live: reads the real persona + login + SteamID. This is also the **Mac-Steam identity hook that
+> Phase 2 online mode leans on** — confirming the live account is exactly what reliable online play needs.
 
 ### D4. Path / case / reproducibility hygiene
-Standardise on the computed `LAUNCHER_DIR`; document the `L4D2-launcher` vs `l4d2-launcher`
-case-insensitivity caveat. Verify a clean-Mac build of the patched binaries via `build-deps.sh`.
+> **DONE 2026-06-04 (code + case caveat; clean-Mac build verify still pending).** `LAUNCHER_DIR` is no longer
+> the hardcoded `~/L4D2-launcher` — it's computed from the script's own location
+> (`cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P`), overridable via `L4D2_LAUNCHER_DIR`, so the launcher runs
+> from any clone path and on a case-sensitive volume. **Case caveat (now understood + documented):** the
+> repo's real on-disk name is **`L4D2-launcher`** (capital); it's often referred to as `l4d2-launcher`, and
+> macOS's case-insensitive default FS makes both resolve to the same directory — which is *exactly why* the
+> old hardcode happened to work here. `pwd -P` canonicalises to the real case. **Still open:** an actual
+> clean-Mac `build-deps.sh` run on fresh hardware to confirm reproducibility (needs another machine).
 
 ### D5. Generalise Apple-GPU matching
-`vendorid 0x106b` + MoltenVK `isAppleGPU` (Apple1–Apple10) already cover M1–M4+. Validate on at least one
-other M-series chip; widen the family check if a newer chip reports differently.
+> **DONE 2026-06-04 (detection + surfacing; cross-chip validation pending hardware).** Added `gpu_preflight`
+> (run in `do_launch`): it reads `system_profiler SPDisplaysDataType`, logs the detected GPU (e.g. "Apple M4
+> Pro"), and confirms the **Metal vendor id `0x106b`** — the value `dxsupport_override.cfg` + MoltenVK
+> `isAppleGPU` key on (covers Apple1–Apple10 = M1–M4+). If a Mac reports a non-Apple vendor it now **warns**
+> that the `0x106b` dxsupport match may not apply, so another chip surfaces clearly in the logs instead of
+> failing silently. **Still open (needs hardware):** run on a non-M4 Apple Silicon Mac and widen the family
+> match if a newer chip reports differently.
 
 ### D6. First-run UX
-A single `./play-l4d2.sh` on a fresh Mac should: build deps → populate prefix → detect Steam + resolution →
-launch. Document exact prereqs (Xcode CLT, `brew install meson ninja glslang`, mingw-w64, Whisky-Wine fetch).
+> **DONE 2026-06-04 (sequence wired + prereqs documented).** A no-arg `./play-l4d2.sh` runs the full
+> first-run pipeline: preflight (macOS/arm64/Rosetta/GPU) → `ensure_gptk` (auto-fetches the Whisky-Wine
+> bundle if absent) → `ensure_patched_moltenvk` → `ensure_prefix` (wineboot) → Mac-Steam preflight (D3) →
+> bridge build/install + helper → `assert_max_settings` (detects resolution, D2) → launch. Exact toolchain
+> prereqs (Xcode CLT, `brew install meson ninja glslang`, mingw-w64) live in
+> [06-building.md](06-building.md#toolchain-prerequisites). **Caveat:** on a truly fresh clone run
+> `build-deps.sh` first — the patched MoltenVK/DXVK binaries aren't in git (the launcher auto-builds the
+> *bridge* but not those two).
 
 ---
 

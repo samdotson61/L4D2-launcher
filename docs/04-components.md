@@ -19,6 +19,11 @@ Steam values from this Mac's Steam app" work on any machine.
 > default Steam library, and `play-l4d2.sh` passes the resolved path to the helper at launch. See
 > [issue #10](03-known-issues.md#10-portability-blockers-per-machine-hardcoding--69-70--porting-goal)
 > / [plan D1](08-roadmap.md#d1-de-hardcode-the-steam-dylib-path-must-fix).
+
+> **Preflight (D3 — DONE 2026-06-04):** `play-l4d2.sh` (on every launch, and standalone via `--steam-check`)
+> verifies the Mac Steam client is running, that this dylib exists, and surfaces the **PersonaName + SteamID**
+> of the signed-in account (parsed from the Mac client's `loginusers.vdf`) so the user confirms the bridge
+> will authenticate as the right account — the same live identity Phase-2 online mode relies on.
 Wire format: `[u32 op][u32 arg_len][args] → [u32 status][u32 ret_len][return]`.
 
 Opcode groups (60+ total):

@@ -152,10 +152,14 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
   `defaultres`/`defaultresheight`, re-asserted every launch; windowed-borderless preserved.
   ([D2](08-roadmap.md#d2-dynamic-resolution))
 
-**Already portable (good):** the bridge pulls **real SteamID / persona / auth live from the running
-Mac Steam client** — no hardcoded SteamID. `vendorid 0x106b` + MoltenVK `isAppleGPU` (Apple1–10)
-cover M1–M4+. The only host requirements are Steam installed + logged in + owning L4D2 (appid 550).
-([D3](08-roadmap.md#d3-plug-in-real-steam-values))
+**Already portable (good) + now preflighted (D3–D6, 2026-06-04):** the bridge pulls **real SteamID /
+persona / auth live from the running Mac Steam client** — no hardcoded SteamID — and the launch preflight
+(also `--steam-check`) now **surfaces that account for confirmation** (D3), **computes `LAUNCHER_DIR`** from
+the script's location instead of a hardcoded path (D4), and **confirms the Apple GPU vendor `0x106b`** (D5).
+`vendorid 0x106b` + MoltenVK `isAppleGPU` (Apple1–10) cover M1–M4+. The only host requirements are Steam
+installed + logged in + owning L4D2 (appid 550). **All six D-items (D1–D6) are now code-complete; the only
+Phase 3 remainder is validation, not code:** a clean-Mac `build-deps.sh` run (D4) and a non-M4 Apple Silicon
+test (D5). ([D3](08-roadmap.md#d3-plug-in-real-steam-values))
 
 ---
 

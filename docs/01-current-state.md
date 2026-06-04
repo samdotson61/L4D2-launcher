@@ -96,16 +96,15 @@ MVK_CONFIG_FAST_MATH_ENABLED=0            (fast-math NaN/Inf in tonemap faults A
 
 ## Repository state (git)
 
-- **Branch:** `main`, **HEAD:** `9a5dedf` (*"working and playable my boy"*) — the HDR-playability
-  milestone, **committed 2026-06-04** (the 2026-06-03 HDR-rendering fix and the 2026-06-04 HDR-playability
-  fix are committed, not pending). The **working tree now carries the uncommitted D1/D2 portability fixes**
-  (de-hardcoded helper dylib path + dynamic resolution — see [08-roadmap.md](08-roadmap.md) D1/D2) plus the
-  matching doc updates. Recent lineage:
-  `9a5dedf` (playability — the attachment-less-skip `0x010c` fix) → `a540195` ("HDR rendering fix + full
-  `0x010c`-under-HDR diagnosis") → `458f9ff` ("flashlight shadows!!!") → `5e29d8d` ("A0"), on top of the
-  prior baseline `8cdc8ca` ("working dx8 no tonemapping no multiplayer") → `38dc236` ("launcher: full HDR …
-  loads into campaigns"). The patched `libMoltenVK.dylib`'s attachment-less-skip fix is carried by the
-  tracked session patch (the built dylib itself stays out of git — see below).
+- **Branch:** `main`. The HDR work (rendering fix 2026-06-03 + the `0x010c`/attachment-less-skip playability
+  fix 2026-06-04) and the **D1–D6 portability work** (2026-06-04) are committed on `main` — run
+  `git log --oneline` for exact hashes and `git status` for any in-progress tree. *(This doc deliberately no
+  longer pins a HEAD hash or clean/dirty state — that went stale on every commit, and git already tracks
+  both.)* Milestone lineage, oldest→newest: `38dc236` ("launcher: full HDR … loads into campaigns") →
+  `8cdc8ca` ("working dx8 …") → `5e29d8d` ("A0") → `458f9ff` ("flashlight shadows") → `a540195` ("HDR
+  rendering fix + `0x010c` diagnosis") → `9a5dedf` ("working and playable my boy") → the D-level portability
+  commits. The patched `libMoltenVK.dylib`'s attachment-less-skip fix rides in the tracked session patch (the
+  built dylib stays out of git — see below).
 - **`DEFAULT_GAME_ARGS`** carries **4× MSAA + multicore** (`mat_queue_mode -1`) + max textures.
 - **Stash:** `stash@{0}` (WIP on `38dc236`) still holds in-progress launcher edits (clean-quit extended
   to the normal launch path, an `L4D2_FORCE_HDR` video.txt toggle, `L4D2_MVK_MTLHEAP` override,
@@ -113,10 +112,9 @@ MVK_CONFIG_FAST_MATH_ENABLED=0            (fast-math NaN/Inf in tonemap faults A
 - **Not in git:** the patched `libMoltenVK.dylib` and `dxvk_d3d9.dll` binaries (rebuildable from
   source via `build-deps.sh` + the tracked `.patch` files); the game-folder config edits.
 
-> **Baseline note:** as of `9a5dedf` the HEAD *label* ("working and playable my boy") is now **accurate** —
-> HDR **renders and is playable** end-to-end at max settings and the engine runs **DX9.5**
-> (`mat_dxlevel 100`). (The older `8cdc8ca` "working dx8 no tonemapping" label — now several commits back —
-> predated both fixes.) What remains is **online multiplayer** and **portability to any Apple Silicon
-> Mac** — see [08-roadmap.md](08-roadmap.md).
+> **Baseline note:** HDR **renders and is playable** end-to-end at max settings and the engine runs **DX9.5**
+> (`mat_dxlevel 100`) — the old `8cdc8ca` "working dx8 no tonemapping" label is long superseded. What remains
+> is **online multiplayer** (Phase 2) and **cross-Mac validation** of the now-code-complete portability work
+> (Phase 3 — D4 clean-Mac build, D5 non-M4 test) — see [08-roadmap.md](08-roadmap.md).
 
 > The `dxsupport.cfg` / `dxsupport_override.cfg` / `video.txt` edits live in the **Steam game folder**, not this repo. A Steam "verify integrity of game files" or game update will regenerate `bin/dxsupport.cfg` and silently revert the HDR-forcing edit. The launcher now re-asserts **`video.txt`** (incl. `mat_queue_mode -1` + `dxlevel 95`) on every launch via `assert_max_settings` ([C2](08-roadmap.md#c2-single-source-of-truth-for-settings)); making the **`dxsupport*.cfg`** edits equally durable is the rest of [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).

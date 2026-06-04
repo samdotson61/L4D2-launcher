@@ -22,7 +22,13 @@ set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 GAME_DIR="${L4D2_GAME_DIR:-$HOME/Library/Application Support/Steam/steamapps/common/Left 4 Dead 2}"
-LAUNCHER_DIR="$HOME/L4D2-launcher"
+# D4 — resolve LAUNCHER_DIR from the script's OWN location instead of assuming a
+# hardcoded ~/L4D2-launcher.  The on-disk dir really is "L4D2-launcher" (capital),
+# and the hardcode happened to match this machine only because macOS is
+# case-insensitive — a clone at a different path/name, or a case-sensitive volume,
+# would break it.  pwd -P canonicalises case + symlinks so we always use the real
+# directory.  Override with L4D2_LAUNCHER_DIR if you ever need to.
+LAUNCHER_DIR="${L4D2_LAUNCHER_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)}"
 GPTK_APP="$LAUNCHER_DIR/Game Porting Toolkit.app"
 GPTK_URL="https://github.com/Gcenx/game-porting-toolkit/releases/download/Game-Porting-Toolkit-3.0-3/game-porting-toolkit-3.0-3.tar.xz"
 # Whisky's bundled Wine 11 + DXVK + MoltenVK — pulled from the community
@@ -171,6 +177,8 @@ Usage:
   play-l4d2.sh --install-bridge    Install bridge steam_api.dll + patch
                                    matchmaking.dll/client.dll (originals backed up)
   play-l4d2.sh --bridge            Full bridge pipeline: build, install, start helper
+  play-l4d2.sh --steam-check       Verify Mac Steam is running + signed in and show
+                                   the account the bridge will authenticate as (D3)
   play-l4d2.sh --hud               Enable Metal/D3DMetal performance HUD
   play-l4d2.sh --debug             Verbose Wine logging to stderr
   play-l4d2.sh --diag              LIGHT, playable diagnostics → game-stderr.log
@@ -192,9 +200,13 @@ Env overrides:
   L4D2_GAME_DIR   Path to the L4D2 install folder
                   (default: ~/Library/Application Support/Steam/steamapps/common/Left 4 Dead 2)
   L4D2_PREFIX     Path to the Wine prefix
-                  (default: ~/L4D2-launcher/prefix)
+                  (default: <launcher dir>/whisky-prefix)
+  L4D2_LAUNCHER_DIR  Path to this launcher/repo directory
+                  (default: auto-detected from the script's own location — D4)
   L4D2_STEAM_DYLIB  Path to libsteam_api.dylib for the native helper
                   (default: $L4D2_GAME_DIR/bin/libsteam_api.dylib)
+  L4D2_MAC_STEAM_DIR  Path to the macOS Steam client dir (D3 account check)
+                  (default: ~/Library/Application Support/Steam)
   L4D2_RES        Force the in-game resolution as WxH, e.g. 1920x1080
                   (default: the main display's detected logical resolution)
 EOF
@@ -219,6 +231,7 @@ while [[ $# -gt 0 ]]; do
     --build-bridge)       ACTION=build-bridge ;;
     --install-bridge)     ACTION=install-bridge ;;
     --bridge)             ACTION=bridge ;;
+    --steam-check)        ACTION=steam-check ;;
     --hud)            EXTRA_ENV+=("MTL_HUD_ENABLED=1") ;;
     --debug)          EXTRA_ENV+=("WINEDEBUG=warn+all,fixme-all") ;;
     --diag)
@@ -433,6 +446,85 @@ steam_exe_unix() { printf '%s' "$PREFIX_DIR$STEAM_EXE_PATH"; }
 steam_installed() { [[ -f "$(steam_exe_unix)" ]]; }
 steam_loginusers() { printf '%s' "$PREFIX_DIR/drive_c/Program Files (x86)/Steam/config/loginusers.vdf"; }
 steam_signed_in() { [[ -f "$(steam_loginusers)" ]]; }
+
+# ─── D3: Mac (host) Steam preflight ──────────────────────────────────────────
+# The bridge proxies to the REAL macOS Steam client (steam_osx) and authenticates
+# as whatever account is signed in there.  These helpers verify that integration
+# is ready and surface the detected account so the user can confirm it's the right
+# one before going online — distinct from the steam_*() helpers above, which deal
+# with the (broken) Steam-for-Windows install inside the Wine prefix.
+MAC_STEAM_DIR="${L4D2_MAC_STEAM_DIR:-$HOME/Library/Application Support/Steam}"
+mac_steam_loginusers() { printf '%s' "$MAC_STEAM_DIR/config/loginusers.vdf"; }
+mac_steam_running()    { pgrep -f 'MacOS/steam_osx' >/dev/null 2>&1; }
+
+# Parse loginusers.vdf → "STEAMID64|PersonaName|AccountName" for the MostRecent
+# account (falls back to the first listed).  Empty output / non-zero if none.
+mac_steam_identity() {
+  local lu="$1"
+  [[ -f "$lu" ]] || return 1
+  perl -0777 -ne '
+    my @u;
+    while (/"(\d{17})"\s*\{(.*?)\}/sg) {
+      my ($id,$b)=($1,$2);
+      my ($p)=$b=~/"PersonaName"\s*"([^"]*)"/i;
+      my ($a)=$b=~/"AccountName"\s*"([^"]*)"/i;
+      my ($m)=$b=~/"MostRecent"\s*"(\d)"/i;
+      push @u,[$id,$p//"",$a//"",($m//0)];
+    }
+    my ($best)=(grep {$_->[3]} @u)[0];
+    $best=$u[0] unless $best;
+    print join("|",@{$best}[0,1,2]) if $best;
+  ' "$lu"
+}
+
+# Full D3 preflight: client-running / dylib-present / which-account.  Called from
+# do_launch and exposed as `--steam-check`.  Warns (not dies) on a not-running or
+# not-signed-in client so utility paths aren't blocked; dies only if the dylib the
+# bridge must load is missing.
+mac_steam_preflight() {
+  say "Mac Steam integration (D3):"
+  if mac_steam_running; then
+    ok "  Mac Steam client (steam_osx) is running"
+  else
+    warn "  Mac Steam client isn't running — open Steam.app and sign in, or the bridge's calls to real Steam will fail."
+  fi
+
+  local dylib="$GAME_DIR/bin/libsteam_api.dylib"
+  if [[ -f "$dylib" ]]; then
+    ok "  Steam API dylib present (${dylib/#$HOME/~})"
+  else
+    die "Steam API dylib missing: $dylib
+   The native helper loads this to proxy to real Steam (the path D1 resolves at
+   runtime). Verify L4D2's files in Steam, or set L4D2_GAME_DIR / L4D2_STEAM_DYLIB."
+  fi
+
+  local lu identity id persona acct
+  lu="$(mac_steam_loginusers)"
+  if identity="$(mac_steam_identity "$lu")" && [[ -n "$identity" ]]; then
+    IFS='|' read -r id persona acct <<<"$identity"
+    ok "  Steam account: ${persona:-<no persona>} (login '${acct:-?}') · SteamID $id"
+    say "  → the bridge authenticates ONLINE as this account; switch accounts in"
+    say "    Steam.app first if that's not the one you want."
+  else
+    warn "  Couldn't read a Steam account from ${lu/#$HOME/~}"
+    warn "  Sign in to Steam.app at least once so it records the account."
+  fi
+}
+
+# D5 — Apple-GPU sanity. dxsupport_override.cfg + MoltenVK isAppleGPU key on the
+# Apple Metal vendor id 0x106b (covers Apple1–Apple10 = M1–M4+). Surface the GPU
+# so a future non-M4 Mac is visible in the logs, and warn if the vendor isn't
+# Apple (then the 0x106b dxsupport match wouldn't apply). See D5 in the roadmap.
+gpu_preflight() {
+  local disp gpu
+  disp="$(system_profiler SPDisplaysDataType 2>/dev/null || true)"
+  gpu="$(awk -F': ' '/Chipset Model:/{print $2; exit}' <<<"$disp")"
+  if grep -q '0x106b' <<<"$disp"; then
+    ok "Apple GPU: ${gpu:-unknown} (Metal vendor 0x106b — matches dxsupport / isAppleGPU)"
+  else
+    warn "GPU vendor isn't Apple 0x106b (${gpu:-unknown}); the dxsupport 0x106b match may not apply on this Mac — see D5 in docs/08-roadmap.md."
+  fi
+}
 
 steam_is_running() {
   # Look for a wine64 process whose args reference steam.exe in our prefix.
@@ -704,6 +796,12 @@ assert_max_settings() {
 do_launch() {
   ensure_prefix
   ensure_appid
+
+  # D3/D5: confirm the Mac Steam integration is ready and show which account the
+  # bridge will authenticate as, plus surface the GPU. Both feed Phase-2 online MP
+  # — the engine uses this real Mac-Steam identity once it's in online mode.
+  mac_steam_preflight
+  gpu_preflight
 
   # Make sure the bridge + binary patches + helper are in place. Each step
   # is idempotent so re-running just no-ops if everything's already set up.
@@ -1339,6 +1437,7 @@ case "$ACTION" in
   install-bridge)      do_install_bridge ;;
   wined3d)             do_launch_wined3d ;;
   bridge)              do_bridge ;;
+  steam-check)         mac_steam_preflight ;;
   launch)              do_launch ;;
   *)                   die "Unknown action: $ACTION" ;;
 esac
