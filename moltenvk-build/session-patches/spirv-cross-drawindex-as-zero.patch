@@ -1,0 +1,67 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index db40c443..5eb4d9e7 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -13466,7 +13466,10 @@ string CompilerMSL::member_attribute_qualifier(const SPIRType &type, uint32_t in
+ 				return string(" [[") + builtin_qualifier(builtin) + "]]";
+ 
+ 			case BuiltInDrawIndex:
+-				SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
++				// gl_DrawID is realized as the constant 0u (see builtin_to_glsl) and is excluded
++				// from the stage-in interface, so it should never reach here. Emit no attribute
++				// qualifier defensively rather than throwing, to guarantee the MSL still compiles.
++				return "";
+ 
+ 			default:
+ 				return "";
+@@ -14263,6 +14266,11 @@ bool CompilerMSL::is_direct_input_builtin(BuiltIn bi_type)
+ 	case BuiltInInstanceIndex:
+ 	case BuiltInBaseInstance:
+ 		return get_execution_model() != ExecutionModelVertex || !msl_options.vertex_for_tessellation;
++	// gl_DrawID is emitted as the constant 0u (see builtin_to_glsl), so it must never be declared
++	// as a direct entry-point argument. Returning false here keeps it out of the [[ ]] argument
++	// list and avoids builtin_qualifier()/builtin_type_decl() throwing for DrawIndex.
++	case BuiltInDrawIndex:
++		return false;
+ 	// Tess. control function in
+ 	case BuiltInPosition:
+ 	case BuiltInPointSize:
+@@ -17682,7 +17690,14 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
+ 			SPIRV_CROSS_THROW("BaseInstance requires Metal 1.1 and Mac or Apple A9+ hardware.");
+ 		}
+ 	case BuiltInDrawIndex:
+-		SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
++		// Metal has no equivalent of gl_DrawID. This MoltenVK is used exclusively for a D3D9 title
++		// (Left 4 Dead 2) via DXVK. D3D9 has no multi-draw-indirect, so every draw is a single,
++		// non-indirect draw where gl_DrawID is, by definition, always 0. Emitting the literal
++		// constant 0u for every read of gl_DrawID is therefore semantically correct here and lets
++		// DXVK's swap-chain blit vertex shader (which references gl_DrawID) compile under MSL.
++		// Because this returns a constant rather than a variable name, gl_DrawID is never declared
++		// as a stage-input member or entry-point argument (see is_direct_input_builtin()).
++		return "0u";
+ 
+ 	// When used in the entry function, output builtins are qualified with output struct name.
+ 	// Test storage class as NOT Input, as output builtins might be part of generic type.
+@@ -17794,7 +17809,10 @@ string CompilerMSL::builtin_qualifier(BuiltIn builtin)
+ 	case BuiltInBaseInstance:
+ 		return "base_instance";
+ 	case BuiltInDrawIndex:
+-		SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
++		// Unreachable: gl_DrawID is emitted as the constant 0u and is never declared as an
++		// argument or stage-in member, so it has no Metal attribute qualifier. Return empty
++		// defensively instead of throwing.
++		return "";
+ 
+ 	// Vertex function out
+ 	case BuiltInClipDistance:
+@@ -18014,7 +18032,9 @@ string CompilerMSL::builtin_type_decl(BuiltIn builtin, uint32_t id)
+ 	case BuiltInBaseInstance:
+ 		return "uint";
+ 	case BuiltInDrawIndex:
+-		SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
++		// Unreachable: gl_DrawID is emitted as the constant 0u and is never declared, so no type
++		// declaration is needed. Return "uint" defensively (its SPIR-V type) instead of throwing.
++		return "uint";
+ 
+ 	// Vertex function out
+ 	case BuiltInClipDistance:

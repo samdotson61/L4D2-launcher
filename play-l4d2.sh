@@ -699,6 +699,28 @@ do_launch() {
     # Overridable via L4D2_MVK_MAB (0=off, 1=on, 2=auto).
     "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=${L4D2_MVK_MAB:-0}"
     "MVK_ALLOW_METAL_FENCES=1"
+    # ── THE HDR 0x010c FIX (2026-06-04) ──────────────────────────────────────────
+    # The heavy-HDR-frame device-lost (Internal Error 0x010c / IOGPUCommandQueue-
+    # ErrorDomain 268) is FIXED in our patched MoltenVK by SKIPPING attachment-less
+    # render passes.  Root cause: DXVK emits a 16384x16384 render pass with ZERO
+    # attachments (no color/depth/stencil) on the first full-scene HDR frame, and
+    # creating a Metal render command encoder with no attachments hard-aborts the
+    # Apple GPU (AGX) with 0x010c — by itself, even with no draws.  It's HDR-only,
+    # which is why HDR was never stably playable before.  Pinpointed via N=1-render-
+    # pass-per-command-buffer + synchronous submission; MVKCommandEncoder::begin-
+    # MetalRenderPass now early-returns (no encoder) for such passes.  HDR is now
+    # playable end-to-end at max settings (4x MSAA + multicore + native res).
+    # Full write-up: docs/03-known-issues.md #2.
+    # Default ON in the patched dylib; passed explicitly here for visibility.
+    # Set L4D2_MVK_SKIP_NOATT=0 to disable (reproduces the original fault).
+    "L4D2_MVK_SKIP_NOATT=${L4D2_MVK_SKIP_NOATT:-1}"
+    # NOTE: the MVK_CONFIG_* / MVK_L4D2_* levers below (RESUME, PREFILL, MTLHEAP,
+    # FORCE_PRIVATE_RT, MTL_DEBUG) are LEGACY pre-fix diagnostics/levers from the
+    # 0x010c hunt — kept for reference and future debugging; none is the fix above.
+    # Deeper diagnostics (off by default): MVK_L4D2_DEBUG=1 -> [mvk-tiledbg] per-pass
+    # attachment footprint + fault logs; MVK_L4D2_SYNC=1 -> synchronous per-buffer
+    # commit to pinpoint a faulting buffer; L4D2_MVK_MAX_PASSES=N -> split the Metal
+    # command buffer after N render passes.
     # RESUME default 0.  The level-load "freeze" is a GPU command-buffer fault
     # (Internal Error 0x010c / IOGPUCommandQueueErrorDomain 268), NOT memory
     # (vmmap shows ~2.1 GB of 32-bit space free at peak).  RESUME=1 lets MoltenVK
@@ -716,7 +738,10 @@ do_launch() {
     # 0x010c lives elsewhere (Apple-GPU tile memory / transient render-target
     # storage — see MVK_L4D2_FORCE_PRIVATE_RT).  Overridable via L4D2_MVK_PREFILL.
     "MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=${L4D2_MVK_PREFILL:-0}"
-    "MVK_CONFIG_USE_MTLHEAP=1"
+    # Overridable via L4D2_MVK_MTLHEAP (1=heaps default, 0=per-resource, 2=force).
+    # Heaps are made resident as a whole unit, so they can over-reserve GPU
+    # residency — a lever on the heavy-HDR-frame resource-pressure 0x010c.
+    "MVK_CONFIG_USE_MTLHEAP=${L4D2_MVK_MTLHEAP:-1}"
     "MVK_CONFIG_PREALLOCATE_DESCRIPTORS=1"
     "MVK_CONFIG_USE_COMMAND_POOLING=1"
     "MVK_CONFIG_LOG_LEVEL=3"
@@ -729,6 +754,11 @@ do_launch() {
     # tile memory.  Default 0; set L4D2_MVK_FORCE_PRIVATE_RT=1 to try it (HDR
     # raised tile-memory pressure and re-triggered the fault under active play).
     "MVK_L4D2_FORCE_PRIVATE_RT=${L4D2_MVK_FORCE_PRIVATE_RT:-0}"
+    # Diagnostics for the opaque 0x010c fault: Apple Metal GPU-side validation.
+    # Default off (heavy); L4D2_MTL_DEBUG=1 + L4D2_MTL_SHADER_VAL=1 to attribute a
+    # faulting shader / OOB access.
+    "MTL_DEBUG_LAYER=${L4D2_MTL_DEBUG:-0}"
+    "MTL_SHADER_VALIDATION=${L4D2_MTL_SHADER_VAL:-0}"
   )
   # DXVK diagnostics — set DXVK_HUD to overlay info in top-left; set
   # DXVK_LOG_LEVEL to "info" or "debug" for stderr logs.  Both

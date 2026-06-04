@@ -32,7 +32,12 @@ DXVK_OUT="$LAUNCHER_DIR/dxvk-build/dxvk_d3d9.dll"
 
 MVK_TAG="v1.4.1"
 MVK_URL="https://github.com/KhronosGroup/MoltenVK.git"
-MVK_PATCH="$LAUNCHER_DIR/moltenvk-build/null-descriptor-fallback.patch"
+# Comprehensive session patch (SUPERSEDES the older null-descriptor-fallback.patch): carries
+# the attachment-less-render-pass skip that fixes the HDR 0x010c freeze (docs/03-known-issues.md
+# #2), plus the null-descriptor fallback, robustImageAccess2, the push-const slot fix, and the
+# default-off diagnostics ([mvk-tiledbg] footprint logging, MVK_L4D2_SYNC, the command-buffer
+# splitter). It is a `git diff` against pristine v1.4.1, so it applies cleanly after checkout.
+MVK_PATCH="$LAUNCHER_DIR/moltenvk-build/session-patches/moltenvk-all-edits-latest.patch"
 MVK_OUT="$LAUNCHER_DIR/moltenvk-build/libMoltenVK.dylib"
 
 # ─── pretty output ────────────────────────────────────────────────────────────
@@ -147,7 +152,7 @@ build_moltenvk() {
     say "Reusing MoltenVK external dependencies"
   fi
 
-  say "Applying null-descriptor-fallback.patch…"
+  say "Applying MoltenVK session patch (attachment-less-skip 0x010c fix + null-descriptor + diagnostics)…"
   git -C "$src" apply --verbose "$MVK_PATCH" || die "MoltenVK patch failed to apply (tag drift?)"
 
   say "Building MoltenVK (make macos)…"

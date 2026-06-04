@@ -22,9 +22,18 @@ BUILD_ROOT=/path ./build-deps.sh   # override scratch clone dir (default /tmp/l4
 ### MoltenVK (`build_moltenvk`)
 - Clones `KhronosGroup/MoltenVK` @ **v1.4.1**.
 - `fetchDependencies --macos` builds SPIRV-Cross/Tools/glslang (slow first time, ~10 min; cached after).
-- Applies `moltenvk-build/null-descriptor-fallback.patch`.
+- Applies the **comprehensive session patch** `moltenvk-build/session-patches/moltenvk-all-edits-latest.patch` (regenerated 2026-06-04). This patch carries the **attachment-less-skip `0x010c` HDR fix** — when a render pass has no color/depth/stencil attachment, MoltenVK skips creating the Metal render command encoder, dodging the AGX `0x010c` device-lost that made HDR unplayable (issue #2) — **in addition to** the older null-descriptor fallback and the rest of the MoltenVK edits. It also bundles the diagnostic instrumentation and a command-buffer splitter (see the env vars below).
 - `make macos`.
 - Output: `moltenvk-build/libMoltenVK.dylib`.
+
+**Runtime env vars baked into this build:**
+
+| Env var | Default | Effect |
+|---|---|---|
+| `L4D2_MVK_SKIP_NOATT` | **on** | The attachment-less-skip `0x010c` HDR fix. Set `=0` to **disable** it (re-introduces the fault — useful only to reproduce/measure it). |
+| `MVK_L4D2_DEBUG` | off | Diagnostics: `[mvk-tiledbg]` per-render-pass attachment-footprint logging (format, samples, bytes/pixel) + per-encoder/userInfo GPU-fault dump. |
+| `MVK_L4D2_SYNC` | off | Commits + `waitUntilCompleted` per command buffer to name the exact faulting buffer in lockstep. Very slow; diagnosis only. |
+| `L4D2_MVK_MAX_PASSES` | off | Command-buffer splitter — cap render passes per command buffer (e.g. `=1` for one pass each). Used with `MVK_L4D2_SYNC` to isolate the faulting pass. Diagnosis only. |
 
 ### Bridge (`build_bridge`)
 - `python3 gen_vtables.py` → regenerates `vtables_generated.c` from `bridge/sdk/`.

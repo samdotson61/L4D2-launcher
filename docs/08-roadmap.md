@@ -14,20 +14,21 @@ at **maximum settings throughout (including multicore rendering)**, and make the
 
 ---
 
-## Where we are (ground truth, 2026-06-02; shading row updated 2026-06-03)
+## Where we are (ground truth, 2026-06-02; shading row updated 2026-06-04)
 
-Reconciled against `git HEAD` and the live game folder. **Update 2026-06-03:** the long-standing "HDR off /
-flat lighting" bug is **SOLVED for rendering** — it was the launcher's own `+mat_hdr_level 1` arg (now removed),
-not DXVK or dxlevel. HDR now **renders**. But HDR-on isn't yet **playable**: it re-triggers the `0x010c`
-device-lost (issue #2) ~30 s into active play, so it's **HDR _or_ playable, not both** until that lands. The
-shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) box,
-[A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker), and
+Reconciled against `git HEAD` and the live game folder. **Update 2026-06-04:** the long-standing "HDR off /
+flat lighting" bug is **fully SOLVED** — rendering was fixed 2026-06-03 (the launcher's own `+mat_hdr_level 1`
+arg, now removed, not DXVK or dxlevel), and **playability was fixed 2026-06-04** (the `0x010c` device-lost,
+issue #2, root-caused to an **attachment-less render pass** and patched in MoltenVK). **HDR is now playable
+end-to-end at max settings** — the user played through campaign level 1 and into level 2 with no freeze/crash.
+The shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) box,
+[A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04), and
 [03-known-issues #1](03-known-issues.md):
 
 | Reality check | State |
 |---|---|
 | `git HEAD` | `8cdc8ca` — *"working dx8 no tonemapping no multiplayer"* |
-| In-game shading | **Full DX9.5 (`mat_dxlevel 100`), HDR _renders_ (`mat_hdr_level 2`)** — proper HDR shading at max settings *(rendering fixed 2026-06-03; but HDR-on isn't yet **playable** — re-triggers the `0x010c` device-lost ~30 s in, see [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) + [A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker))* |
+| In-game shading | **Full DX9.5 (`mat_dxlevel 100`), HDR playable (`mat_hdr_level 2`)** — proper HDR shading at max settings, **playable end-to-end** *(rendering fixed 2026-06-03, playability fixed 2026-06-04 — the `0x010c` device-lost is solved, see [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) + [A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04))* |
 | Multiplayer | **Not working** — bridge plumbing exists, but the engine is never put into Steam "online mode" |
 | `video.txt` dxlevel | Launcher now asserts `setting.dxlevel 95` on every launch (C2 ); `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
 | Multicore | `mat_queue_mode -1` (**on**), now re-asserted in `video.txt` every launch; the `--wined3d` landmine is fixed — see [C1](#c1-neutralise-the-multicore-landmine-must-fix) |
@@ -38,39 +39,45 @@ shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-hdr-
 
 # Phase 1 — Proper shading: HDR + DX9.5 at max settings
 
-> **RENDERING ACHIEVED 2026-06-03 — PLAYABILITY NOT YET MET.** Proper HDR/DX9.5 shading now **renders** **at max settings (4× MSAA + multicore both ON)**. But HDR-on re-triggers the `0x010c` device-lost (see the open work item below), so the Phase 1 *playability* milestone is **not** met: it's currently **HDR _or_ playable, not both**.
+> **DONE 2026-06-04 — RENDERING *and* PLAYABILITY ACHIEVED.** Proper HDR/DX9.5 shading now **renders and is playable end-to-end** **at max settings (4× MSAA + multicore both ON)**. The `0x010c` device-lost that previously blocked playability is **solved** (see A0 below). The user played through campaign level 1 and into level 2 with no freeze/crash; automated runs log 0 `0x010c` faults over repeated 150 s HDR sessions. The Phase 1 milestone is **met**.
 >
 > **Real root cause (of the flat lighting):** the launcher's own `DEFAULT_GAME_ARGS` passed `+mat_hdr_level 1` (and `+mat_hdr_level 2`). The engine logs `Unknown command "mat_hdr_level"` for these — but it is **not** a no-op: the engine **queues** the unknown convar and applies it the instant `mat_hdr_level` registers during material-system init, **pinning HDR to level 1 (LDR+bloom)** every launch. At level 1 on L4D2's HDR-only maps, the engine reads the empty LDR lighting lump, logs `Level unlit, setting 'mat_fullbright 1'`, and renders fullbright — the exact flat/over-bright/no-baked-shadow symptom.
 >
 > **The fix (for rendering):** **delete** both `+mat_hdr_level` tokens from `DEFAULT_GAME_ARGS`. There was nothing to *add* — the fix is the **absence** of the bad token. The engine's true hardware-derived default (level 2, full HDR) then stands. `DEFAULT_GAME_ARGS` is now `-novid -vulkan +r_flashlightdepthtexture 1 +mat_queue_mode -1 +mat_picmip 0 +r_waterforceexpensive 1 +r_shadowrendertotexture 1 +mat_antialias 4`.
 >
-> **Verified this session:** a VScript probe (`Convars.GetFloat`) reads `mat_hdr_level=2` after removal (was `1` with the args); `Level unlit` is gone; `mat_fullbright` is no longer force-set; `mat_dxlevel` reads `100` (full DX9.5). Full HDR **renders** and **coexists** with 4× MSAA and `mat_queue_mode -1`.
+> **Verified:** a VScript probe (`Convars.GetFloat`) reads `mat_hdr_level=2` after removal (was `1` with the args); `Level unlit` is gone; `mat_fullbright` is no longer force-set; `mat_dxlevel` reads `100` (full DX9.5). Full HDR renders and **coexists** with 4× MSAA and `mat_queue_mode -1`.
 >
-> **But HDR-on isn't playable yet:** enabling HDR re-triggers the `0x010c` device-lost (issue #2) ~30 s into active play — at the first full-scene frame, the FP16 HDR render targets are the extra GPU pressure that tips the marginal M4 AGX tile-memory threshold → `VK_ERROR_DEVICE_LOST` → freeze. Every historical "playable" build was secretly **HDR-off** (even commit 38dc236's "full HDR" title carried the same `+mat_hdr_level 1` pin), so this `0x010c`-under-HDR coupling is **new ground**, uncovered only by finally enabling HDR. See the open work item below.
+> **The playability fix (`0x010c`, 2026-06-04):** the device-lost was **not** an FP16 tile-memory overflow as first theorized — it was an **attachment-less render pass**. On the first full-scene HDR frame DXVK emits a 16384×16384 render pass with **zero attachments**, and creating a Metal render command encoder with no attachments **hard-aborts the AGX GPU with `0x010c`** (surfacing as `VK_ERROR_DEVICE_LOST`; not an OOM — ~1.8 GB of 18 GB). Patched MoltenVK now **skips creating the encoder for an attachment-less pass**, eliminating the fault. Every historical "playable" build was secretly **HDR-off** (even commit 38dc236's "full HDR" title carried the same `+mat_hdr_level 1` pin), so this is the **first build that is HDR-on _and_ playable**.
 >
 > **Bonus:** dynamic flashlight shadows are now ON via `+r_flashlightdepthtexture 1` (was the old `0` stopgap) — same queued-arg mechanism, confirmed working.
 >
-> Full write-up: [03-known-issues #1](03-known-issues.md) (rendering) · [#2](03-known-issues.md) (the playability blocker).
+> Full write-up: [03-known-issues #1](03-known-issues.md) (rendering) · [#2](03-known-issues.md) (playability — SOLVED).
 
-**Milestone (rendering met; playability NOT met):** HDR/DX9 shading **renders** correctly (interiors read
-dark, walls shaded correctly) at **every setting maxed (incl. multicore)** — but the playability half is
-**open**: HDR-on must survive past the first full-scene frame without the `0x010c` device-lost. Not met until
-[A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker) lands.
+**Milestone — MET 2026-06-04:** HDR/DX9 shading renders correctly (interiors read dark, walls shaded
+correctly) and is **playable end-to-end** at **every setting maxed (incl. multicore)** — HDR-on survives the
+full-scene frame and a level-1→2 playthrough with no `0x010c` device-lost. Closed by
+[A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04). The only residual is an occasional stutter (a
+perf nit, issue #5), not a blocker.
 
-### A0. Fix `0x010c` device-lost under HDR — OPEN (the Phase 1 playability blocker)
-> **OPEN — top remaining Phase 1 work item.** HDR *rendering* is solved (above), but turning HDR on
-> re-triggers the `0x010c` device-lost (`VK_ERROR_DEVICE_LOST`) ~30 s into play (issue #2). The FP16 HDR
-> render targets tip the marginal M4 AGX tile-memory threshold at the first heavy frame. This is the
-> blocker between "HDR renders" and "HDR is playable."
-- **Confirmed red herrings (do not re-chase):** MSAA and multicore are **not** the trigger — HDR faults
-  identically with them on or off. The documented levers (`FORCE_PRIVATE_RT`, `RESUME`, `PREFILL`, lower
-  resolution) all **failed**. The fault is **opaque** — `Internal Error`, no encoder/resource attribution —
-  so it can't be pinned to a draw from logs.
-- **Next untried direction:** a **pooled-scratch render-target spill** in MoltenVK — when a memoryless
-  attachment would overflow, spill it to a single *reused* device buffer (avoiding both the tile overflow
-  and the per-resource resident-memory increase that doomed the naive Private attempt). Requires
-  re-cloning MoltenVK + a non-trivial patch + slow rebuild cycles (~10-min dep build per shot); genuinely
-  **uncertain odds**. Full analysis: [03-known-issues #2](03-known-issues.md).
+### A0. Fix `0x010c` device-lost under HDR — DONE 2026-06-04
+> **DONE — the Phase 1 playability blocker is closed.** Turning HDR on used to re-trigger the `0x010c`
+> device-lost (`VK_ERROR_DEVICE_LOST`) ~30 s into play (issue #2); HDR is now **playable end-to-end at max
+> settings** (user played levels 1→2, 0 faults in automated 150 s runs).
+- **Root cause (found, not theorized):** an **attachment-less render pass**. On the first full-scene HDR
+  frame DXVK emits a 16384×16384 render pass with **no color/depth/stencil attachment**; creating a Metal
+  `MTLRenderCommandEncoder` with no attachments hard-aborts the AGX GPU with Internal Error `0x010c` — by
+  itself, even with no draws. **Not** a tile-memory overflow (the earlier theory): the heaviest pass is only
+  36 B/px and the main scene is BGRA8_sRGB, not FP16.
+- **The fix:** in MoltenVK's `MVKCommandEncoder::beginMetalRenderPass`, when the render-pass descriptor has
+  no attachment, **skip creating the render encoder and return early** (`_mtlRenderEncoder` is already nil,
+  so draws into that pass are safe no-ops). Default on; `L4D2_MVK_SKIP_NOATT=0` disables. Ships in
+  `moltenvk-build/session-patches/moltenvk-all-edits-latest.patch`.
+- **How it was pinpointed (the fault is opaque):** the kernel log gives no faulting address, Metal's encoder
+  status returns "no encoder info", and the Metal validation layer no-ops under Rosetta/Wine — so attribution
+  came from custom MoltenVK instrumentation: `[mvk-tiledbg]` attachment-footprint logging (which **refuted**
+  the tile-budget theory), `MVK_L4D2_SYNC` per-buffer commit+wait, and a command-buffer splitter
+  (`L4D2_MVK_MAX_PASSES`) that at N=1 isolated the lone attachment-less pass. Full analysis:
+  [03-known-issues #2](03-known-issues.md).
 
 > **SUPERSEDED 2026-06-03 — original "Why HDR is off" hypothesis was wrong.** The text below blamed DXVK
 > `CheckDeviceFormat` / dxlevel-forcing. That was a **red herring**: an instrumented probe confirmed DXVK
@@ -133,16 +140,17 @@ per-frame GPU occlusion-query luminance histogram. If adaptive exposure proves u
 `listenserver.playable.bak` recipe — **`mat_dynamic_tonemapping 0` (fixed exposure)** with a sane
 `mat_force_tonemap_scale` — is a fallback; full adaptive exposure is the A5 stretch goal (`#68`).
 
-### A4. Verify HDR *rendering* at MAX settings — DONE 2026-06-03 (rendering only)
-Verified (rendering): VScript probe reads `mat_hdr_level=2` and `mat_dxlevel=100`; `Level unlit`/forced
-`mat_fullbright` absent from `console.log`; user confirmed the visual — HDR **renders** correctly **with HDR-on
-+ 4× MSAA + multicore all active**. **Playability is separate and NOT verified:** subsequent active-play
-testing shows HDR-on re-triggers the `0x010c` device-lost ~30 s into the first full-scene frame (issue #2 /
-[A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker)) — the earlier "stayed up over a
-78-second run" read covered the rendering/probe window, not sustained active play. (Note: the diag harness's
-`HDR Enabled` grep is
-*not* the authoritative read — the VScript probe and the absence of `Level unlit` are; the harness still
-**cannot** judge tonemapping, so the user remains the visual authority.)
+### A4. Verify HDR at MAX settings — DONE 2026-06-04 (rendering AND playability)
+Verified (rendering, 2026-06-03): VScript probe reads `mat_hdr_level=2` and `mat_dxlevel=100`; `Level
+unlit`/forced `mat_fullbright` absent from `console.log`; user confirmed the visual — HDR renders correctly
+**with HDR-on + 4× MSAA + multicore all active**. **Playability now verified too (2026-06-04):** with the
+attachment-less-skip `0x010c` fix ([A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04)), the user
+**played through campaign level 1 and into level 2 with no freeze and no crash** at max settings (HDR on);
+automated runs log **0 `0x010c` faults** over repeated 150 s sessions and skip 13,000+ attachment-less passes
+with no visual regression. The earlier "stayed up over a 78-second run" read covered only the rendering/probe
+window; this is sustained active play. (Note: the diag harness's `HDR Enabled` grep is *not* the authoritative
+read — the VScript probe and the absence of `Level unlit` are; the harness still **cannot** judge tonemapping,
+so the user remains the visual authority.) Residual: an occasional stutter (perf nit, issue #5), not a blocker.
 
 ### A5. Stretch quality (not blockers)
 - `#68` — reimplement D3D9 occlusion queries in DXVK → true auto-exposure at full speed.
@@ -177,8 +185,11 @@ stand — see Phase 1 box and [03-known-issues #1](03-known-issues.md).
 > Note: asserting `dxlevel 95` in `video.txt` also lands the **`video.txt` portion of [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8)** early. A2's remaining scope is making the `dxsupport.cfg` / `dxsupport_override.cfg` edits equally durable across a Steam file-verify.
 
 ### C3. Verify max survives HDR-on + online mode
-Re-confirm the `0x010c` crash stays away at max+HDR, and handle the `FCVAR_CHEAT` gating of auto-exposure
-in online play (`#67`) if/when A5 lands.
+**Max + HDR-on: confirmed (2026-06-04).** The `0x010c` crash stays away at max settings with HDR on — the
+attachment-less-skip fix ([A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04)) holds across a
+level-1→2 playthrough and repeated 150 s runs (0 faults). **Still open (rolls into Phase 2):** re-confirm this
+once the engine is in **online mode**, and handle the `FCVAR_CHEAT` gating of auto-exposure in online play
+(`#67`) if/when A5 lands.
 
 ---
 
@@ -283,12 +294,14 @@ launch. Document exact prereqs (Xcode CLT, `brew install meson ninja glslang`, m
 - ~~**HDR via DXVK 2.5.3 is the leading hypothesis but untested.**~~ **RESOLVED 2026-06-03 (for rendering)** —
   DXVK was never the HDR lever; HDR was pinned off by the launcher's own `+mat_hdr_level 1` arg, now removed.
   HDR *rendering* is no longer a risk.
-- **`0x010c` device-lost under HDR (NEW, OPEN)** — enabling HDR re-triggers the `0x010c` ~30 s into play
-  (issue #2 / [A0](#a0-fix-0x010c-device-lost-under-hdr--open-the-playability-blocker)); the next attempt
-  (a pooled-scratch RT spill in MoltenVK) is slow and **uncertain**. This is the live Phase 1 risk now.
+- ~~**`0x010c` device-lost under HDR (NEW, OPEN)**~~ **RESOLVED 2026-06-04** — root-caused to an
+  **attachment-less render pass** (a 16384×16384 pass with zero attachments hard-aborts the AGX GPU), **not**
+  a tile-memory overflow as first theorized; patched MoltenVK skips creating an encoder for it (issue #2 /
+  [A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04)). HDR is playable end-to-end at max settings.
+  No longer a Phase 1 risk.
 - **Online mode (firing 101) historically hangs** — Phase 2 is real engineering, the highest-risk part of
-  this roadmap, not a setting.
+  this roadmap, not a setting. **This is now the leading live risk.**
 - **VAC risk** on secured official servers under Wine — must be flagged before connecting.
 - ~~**Memory/docs conflict** ("HDR worked" in an earlier note vs. `HDR Disabled` in git/docs).~~ Moot as of
-  2026-06-03: HDR genuinely **renders** now (`mat_hdr_level 2`), so the "HDR renders" position is the correct
-  one — with the caveat that HDR-on isn't yet *playable* (the `0x010c`, issue #2 / A0).
+  2026-06-04: HDR genuinely **renders and is playable** now (`mat_hdr_level 2`, playable end-to-end at max
+  settings after the `0x010c` fix, issue #2 / A0), so the "HDR works" position is the correct one.

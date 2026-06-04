@@ -10,7 +10,7 @@
 # L4D2 wrapper for Apple Silicon macOS 26
 
 Runs **Left 4 Dead 2** (the 32-bit Windows build) on Apple Silicon, signed in to your real Steam
-account. **Single-player is playable today; HDR rendering now works**, though HDR-on is **not yet playable** (it trips a GPU device-lost fault — see [issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). **Online multiplayer** and
+account. **Single-player is playable today, and HDR is now playable at max settings** — the GPU device-lost fault that used to make HDR-on freeze is fixed (2026-06-04; see [issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). **Online multiplayer** and
 **portability to any Apple Silicon Mac** are the remaining active work — see the **[Roadmap](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md)**.
 
 Left 4 Dead 2's native macOS build is 32-bit (i386). macOS dropped 32-bit support at Catalina, and
@@ -21,7 +21,7 @@ turnkey installer.
 
 ## Status at a glance
 
-Current baseline: `git HEAD 8cdc8ca` + the **2026-06-03 HDR fix** (HDR now **renders**, but isn't yet **playable** — see the HDR row; the *"working dx8 no tonemapping"* HEAD label predates the fix).
+Current baseline: `git HEAD 8cdc8ca` + the **2026-06-03 HDR-rendering fix** and the **2026-06-04 HDR-playability fix** (HDR now renders **and is playable** at max settings — see the HDR row; the *"working dx8 no tonemapping"* HEAD label predates both fixes).
 
 | Aspect | State |
 |---|---|
@@ -29,7 +29,7 @@ Current baseline: `git HEAD 8cdc8ca` + the **2026-06-03 HDR fix** (HDR now **ren
 | Loads into a campaign (renders, HUD, weapons, bots) | Working (single-player) |
 | Framerate (native res, max settings) | ~90–130 fps on the test map |
 | Max settings (4× MSAA + multicore + max textures) | On — the launcher re-asserts the full max-settings block in `video.txt` every launch (C2) |
-| **HDR / tonemapping + DX9 shading** | **Renders, not yet playable** — rendering fixed 2026-06-03 (was our own `+mat_hdr_level 1` pin; removed → engine default = full HDR, at DX9.5 `mat_dxlevel 100`), but HDR-on freezes ~30 s into play via the `0x010c` device-lost ([issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)) |
+| **HDR / tonemapping + DX9 shading** | **Playable** — rendering fixed 2026-06-03 (was our own `+mat_hdr_level 1` pin; removed → engine default = full HDR, at DX9.5 `mat_dxlevel 100`); **playability fixed 2026-06-04** — the `0x010c` device-lost was an **attachment-less render pass** (a 16384×16384 pass with zero attachments hard-aborts the AGX GPU), now skipped in patched MoltenVK. User played levels 1→2 with no freeze/crash; 0 faults in 150 s runs. Only residual: an occasional stutter ([issue #5](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). ([issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)) |
 | Flashlight shadow | On (`r_flashlightdepthtexture 1`) — dynamic shadows render |
 | **Online / multiplayer** | **Not working** — bridge plumbing present, but the engine is never put into Steam "online mode" → [Phase 2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
 | **Portability (any Apple Silicon Mac)** | Goal — close, but a hardcoded dylib path + resolution block it → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
@@ -122,7 +122,7 @@ Tracked source (this is the source of truth):
 | `bridge/steam_api.def` | DLL export list |
 | `bridge/sdk/` | Steamworks SDK 1.53a headers (vtable-generation input) |
 | `dxvk-build/shadow-sampler-workaround.patch` | our DXVK source patch |
-| `moltenvk-build/null-descriptor-fallback.patch` | our MoltenVK source patch |
+| `moltenvk-build/session-patches/moltenvk-all-edits-latest.patch` | our MoltenVK source patch (incl. the attachment-less-skip `0x010c` HDR fix) |
 | `docs/` | the documentation in this index (kept in lockstep with the code) |
 | `sign-in.sh` | one-shot Steam sign-in helper |
 
@@ -192,7 +192,15 @@ Rebuilt by `build-deps.sh bridge`. No upstream; it's ours.
 - mingw-w64 14.0+ build fixes (`_D3DDEVINFO_RESOURCEMANAGER`, `ID3D10StateBlock` UUID redefinition, missing
   `<cstdint>`).
 
-### MoltenVK 1.4.1 — `moltenvk-build/null-descriptor-fallback.patch`
+### MoltenVK 1.4.1 — `moltenvk-build/session-patches/moltenvk-all-edits-latest.patch`
+- **Attachment-less render-pass skip — the HDR `0x010c` playability fix (2026-06-04).** On the first
+  full-scene HDR frame DXVK emits a 16384×16384 render pass with **zero attachments**; creating a Metal render
+  command encoder with no attachments hard-aborts the AGX GPU with Internal Error `0x010c` (surfacing as
+  `VK_ERROR_DEVICE_LOST` — not a true OOM). The patch makes `MVKCommandEncoder::beginMetalRenderPass` **skip
+  creating the encoder** when the pass has no color/depth/stencil attachment, so draws into it become safe
+  no-ops. This is what makes HDR playable end-to-end. Default on; `L4D2_MVK_SKIP_NOATT=0` disables it. Also
+  bundles the instrumentation that pinpointed the fault (`[mvk-tiledbg]` attachment-footprint logging,
+  `MVK_L4D2_SYNC`, the `L4D2_MVK_MAX_PASSES` command-buffer splitter — all off by default).
 - **Null-descriptor fallback**: unbound descriptor slots point at a zero-filled 64 KB buffer / 1×1 texture /
   sampler instead of nil, so the GPU reads zeros instead of faulting (VK_EXT_robustness2 `nullDescriptor`).
 - **`isAppleGPU` detection** fixed for M-series (was gated on `Apple1` family, which modern chips don't
@@ -264,15 +272,19 @@ WINED3D_RENDERER=gl               # with --wined3d: force GL backend
 
 Full list with cause/workaround/status: [03 — Known issues](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md). The big ones:
 
-- **HDR rendering — SOLVED; HDR playability — BLOCKED (2026-06-03).** The flat, over-bright, no-shadow
+- **HDR — SOLVED (rendering 2026-06-03, playability 2026-06-04).** The flat, over-bright, no-shadow
   lighting was caused by the launcher's own `+mat_hdr_level 1` token: the engine logs it as `Unknown command`
   but **queues and applies** it at material-system init, pinning HDR to LDR+bloom. L4D2's maps are HDR-only, so
   that read the empty LDR lighting lump → `Level unlit` → fullbright. **Removing the token** lets the engine
   default (full HDR, level 2) stand — `mat_hdr_level` reads 2, the engine is at DX9.5 (`mat_dxlevel 100`), and
-  maps light correctly at max settings. **But turning HDR on re-triggers the `0x010c` device-lost** (issue #2)
-  ~30 s into play — the FP16 HDR render targets tip the marginal M4 AGX threshold → freeze. So HDR **renders**
-  but isn't yet **playable**; the `0x010c`-under-HDR is now the **top remaining blocker**. DXVK version,
-  DX8/dxlevel, MSAA, and multicore were all confirmed **red herrings**. Details:
+  maps light correctly at max settings. **Playability was then blocked by the `0x010c` device-lost** (issue #2),
+  which turned out to be an **attachment-less render pass**: on the first full-scene HDR frame DXVK emits a
+  16384×16384 render pass with **zero attachments**, and creating a Metal render encoder with no attachments
+  hard-aborts the AGX GPU with `0x010c` (it surfaces as `VK_ERROR_DEVICE_LOST` but is **not** an OOM). Patched
+  MoltenVK now **skips creating the encoder for an attachment-less pass**, so HDR is **playable end-to-end at
+  max settings** — the user played campaign levels 1→2 with no freeze/crash; automated runs log 0 `0x010c`
+  faults. (DXVK version, DX8/dxlevel, MSAA, multicore, FP16 targets, and the tile-memory budget were all
+  confirmed **red herrings**.) The only residual is an occasional stutter (a perf nit). Details:
   [issue #1](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md) ·
   [issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md).
 - **Online multiplayer doesn't work yet.** The bridge proxies lobbies, P2P, the server browser, and auth to

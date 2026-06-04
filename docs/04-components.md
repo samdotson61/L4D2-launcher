@@ -82,23 +82,25 @@ D3D9 → Vulkan. Built from **DXVK v1.10.3** + `shadow-sampler-workaround.patch`
 
 ## MoltenVK — `moltenvk-build/`
 
-Vulkan → Metal. Built from **MoltenVK v1.4.1** + `null-descriptor-fallback.patch`.
+Vulkan → Metal. Built from **MoltenVK v1.4.1** + the comprehensive session patch `session-patches/moltenvk-all-edits-latest.patch` (regenerated 2026-06-04; supersedes the older `null-descriptor-fallback.patch`, whose fixes it still includes).
 
 | File | What |
 |---|---|
-| `libMoltenVK.dylib` | **Active/deployed** (sha1 `9e8abed1…`) |
+| `libMoltenVK.dylib` | **Active/deployed** — built from the 2026-06-04 session patch (carries the attachment-less-skip `0x010c` HDR fix) |
 | `libMoltenVK.dylib.pre-tracked-bak` | Identical recovery copy |
 | `libMoltenVK.dylib.v141patched.bak` | Identical (1.4.1 + patch checkpoint) |
 | `libMoltenVK.dylib.transplant` | **Different** build — an experiment that transplanted 1.4.0's occlusion subsystem into 1.4.1; **refuted** (still faulted), not deployed |
-| `null-descriptor-fallback.patch` | The MoltenVK patch (below) |
+| `session-patches/moltenvk-all-edits-latest.patch` | The MoltenVK patch (below) |
 
-**`null-descriptor-fallback.patch`** does:
-1. **Null-descriptor fallback** — bind zero-filled dummy buffer/texture/sampler for unbound (nil) descriptors instead of letting Metal deref address 0 (which faults `0x010c`). Matches `VK_EXT_robustness2` "reads return zero" semantics.
-2. **isAppleGPU fix** — the M4 Pro doesn't report `MTLGPUFamilyApple1` in some Metal versions; check any Apple family (Apple1–Apple10) so Apple-GPU code paths (incl. robustImageAccess2) actually engage.
-3. **robustness2 advertisement tuning** — `robustBufferAccess2=false` (Metal does NOT clamp OOB buffer access), `robustImageAccess2=isAppleGPU` (Metal DOES clamp images), `nullDescriptor=true`.
-4. **MVKPipelineLayout always reserves a push-constant buffer slot per stage** — fixes the `cbuffer_t` + push-const both-at-MSL-buffer-0 collision (`#36`, "the rendering bug").
-5. **Transient attachment storage** — optional `MVK_L4D2_FORCE_PRIVATE_RT` to back transient/memoryless attachments in Private (device) memory instead of tile memory, dodging tile-budget exhaustion (`#56`).
-6. **GPU-fault diagnostics** — running allocation tally + per-encoder/userInfo fault dump under `MVK_L4D2_DEBUG=1` (this is what `--diag` reads to distinguish a true OOM from a `0x010c` internal error).
+**`moltenvk-all-edits-latest.patch`** does:
+1. **Attachment-less render-pass skip — the HDR playability fix (`0x010c`, issue #2, SOLVED 2026-06-04).** In `MVKCommandEncoder::beginMetalRenderPass`, when the render-pass descriptor has **no color/depth/stencil attachment**, skip creating the Metal `MTLRenderCommandEncoder` and return early. On the first full-scene HDR frame DXVK emits a 16384×16384 render pass with **zero attachments**; creating a render encoder with no attachments **hard-aborts the AGX GPU with Internal Error `0x010c`** (it is not a true OOM). `_mtlRenderEncoder` is already nil, so draws into that pass become safe no-ops and the next real pass re-establishes encoder state. **Default on**; `L4D2_MVK_SKIP_NOATT=0` disables it. This is what makes HDR playable end-to-end at max settings.
+2. **Null-descriptor fallback** — bind zero-filled dummy buffer/texture/sampler for unbound (nil) descriptors instead of letting Metal deref address 0 (which faults `0x010c`). Matches `VK_EXT_robustness2` "reads return zero" semantics.
+3. **isAppleGPU fix** — the M4 Pro doesn't report `MTLGPUFamilyApple1` in some Metal versions; check any Apple family (Apple1–Apple10) so Apple-GPU code paths (incl. robustImageAccess2) actually engage.
+4. **robustness2 advertisement tuning** — `robustBufferAccess2=false` (Metal does NOT clamp OOB buffer access), `robustImageAccess2=isAppleGPU` (Metal DOES clamp images), `nullDescriptor=true`.
+5. **MVKPipelineLayout always reserves a push-constant buffer slot per stage** — fixes the `cbuffer_t` + push-const both-at-MSL-buffer-0 collision (`#36`, "the rendering bug").
+6. **Transient attachment storage** — optional `MVK_L4D2_FORCE_PRIVATE_RT` to back transient/memoryless attachments in Private (device) memory instead of tile memory (`#56`). *(Ruled out as the `0x010c` fix — made it worse — kept only as a lever.)*
+7. **Instrumentation that pinpointed the `0x010c` fault** (all off by default): `[mvk-tiledbg]` logs every render pass's attachment footprint (format, samples, bytes/pixel) — this **refuted** the tile-memory-budget theory (heaviest pass is only 36 B/px, main scene is BGRA8_sRGB not FP16); `MVK_L4D2_SYNC` commits + `waitUntilCompleted` per command buffer to name the faulting buffer in lockstep; and a **command-buffer splitter** (`L4D2_MVK_MAX_PASSES`) which at N=1 + sync isolated the lone attachment-less pass as the culprit.
+8. **GPU-fault diagnostics** — running allocation tally + per-encoder/userInfo fault dump under `MVK_L4D2_DEBUG=1` (this is what `--diag` reads to distinguish a true OOM from a `0x010c` internal error).
 
 > Deploy note: `ensure_patched_moltenvk` checks for a marker string in the installed dylib and may **skip** redeploying a rebuilt dylib. If you rebuild, manually `cp` it into the Whisky lib dir and `codesign --force --sign - -i org.l4d2launcher.moltenvk.$(date +%s)` it (Rosetta AOT cache keys on the signature).
 

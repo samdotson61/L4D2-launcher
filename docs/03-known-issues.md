@@ -2,12 +2,14 @@
 
 Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g. `#66`) reference the project task tracker.
 
-> Issue #1 (HDR/DX9 shading) is **SOLVED** (2026-06-03 — see below). The forward plan that closes
-> the rest (#6 online multiplayer + #9, #10 portability, all at max settings) is **[08-roadmap.md](08-roadmap.md)**.
+> Issues #1 (HDR/DX9 shading) **and** #2 (`0x010c` device-lost under HDR) are both **SOLVED** (#1 on
+> 2026-06-03, #2 on 2026-06-04 — see below). **HDR is now fully playable at max settings** (4× MSAA +
+> multicore + native res), confirmed by a campaign playthrough. The forward plan that closes the rest
+> (#6 online multiplayer + #9, #10 portability, all at max settings) is **[08-roadmap.md](08-roadmap.md)**.
 
 ---
 
-## 1. HDR rendering — SOLVED 2026-06-03 · *playability* blocked by #2 below (`#66`)
+## 1. HDR rendering — SOLVED 2026-06-03 · *playability* SOLVED 2026-06-04 (issue #2 fixed) (`#66`)
 
 **Symptom (now fixed).** The scene rendered flat and over-bright with no baked shadows — a dark interior read as brightly lit as the sunlit exterior. The console showed `Level unlit, setting 'mat_fullbright 1'`.
 
@@ -30,34 +32,47 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
 - **Exposure convars** (`mat_dynamic_tonemapping`, `mat_force_tonemap_scale`): not the cause — they had nothing to tonemap while the level was fullbright.
 - **dxsupport.cfg / dxsupport_override.cfg dxlevel edits:** did not and could not enable HDR.
 
-**HDR renders, but is not yet *playable*.** Logs prove the engine is in HDR mode (`mat_hdr_level 2`, no `Level unlit`) and the scene renders in HDR. **But turning HDR on re-triggers the `0x010c` device-lost fault** (issue #2) at the first full-scene frame (~25–40 s) → freeze. So the flat-lighting **root cause is solved and HDR *rendering* works**; HDR **playability** is blocked by #2. Don't claim HDR "works" end-to-end until #2 is fixed.
+**HDR renders, and is now *playable* (issue #2 fixed 2026-06-04).** Logs prove the engine is in HDR mode (`mat_hdr_level 2`, no `Level unlit`) and the scene renders in HDR. Turning HDR on used to re-trigger the `0x010c` device-lost fault (issue #2) at the first full-scene frame (~25–40 s) → freeze; that fault is now **solved** (the attachment-less render-pass skip — see #2 below), so HDR is playable end-to-end at max settings. The flat-lighting **root cause is solved and HDR works** — both rendering and playability.
 
 ---
 
-## 2. `0x010c` device-lost under HDR (TOP BLOCKER for HDR playability — `#41`, `#62`, `#64`)
+## 2. `0x010c` device-lost under HDR — SOLVED 2026-06-04 (was the TOP BLOCKER for HDR playability — `#41`, `#62`, `#64`)
 
-**Symptom.** With **HDR on**, ~25–40 s into a map — at the **first full-scene gameplay frame** — the GPU aborts the command buffer with `MTLCommandBufferError Internal Error 0000010c` (`IOGPUCommandQueueErrorDomain 268`), surfaced by MoltenVK as `VK_ERROR_DEVICE_LOST` / `VK_ERROR_OUT_OF_DEVICE_MEMORY` ("Lost VkDevice after vkQueueSubmit"). The game freezes. It is **not** a true OOM (~1.8 GB used, gigabytes free).
+**Symptom (now fixed).** With **HDR on**, ~25–40 s into a map — at the **first full-scene gameplay frame** — the GPU aborted the command buffer with `MTLCommandBufferError Internal Error 0000010c` (`IOGPUCommandQueueErrorDomain 268`), surfaced by MoltenVK as `VK_ERROR_DEVICE_LOST` / `VK_ERROR_OUT_OF_DEVICE_MEMORY` ("Lost VkDevice after vkQueueSubmit"). The game froze. It was **not** a true OOM (~1.8 GB used of 18 GB, gigabytes free). The fault was **HDR-specific** — LDR never emitted the offending pass — which is exactly why every prior "playable" build was secretly HDR-off (see #1).
 
-**This is now the top blocker.** Enabling HDR (2026-06-03, issue #1) made this fault — previously *latent* with HDR off — fire **every run**. The FP16 HDR render targets are the extra GPU pressure that tips the marginal AGX threshold at the first heavy frame. HDR *renders correctly*; it just can't survive past the first full-scene frame.
+**Root cause — an attachment-less render pass.** On the first full-scene HDR frame, DXVK emits a render pass with a **16384×16384 framebuffer and ZERO attachments** (no color, no depth, no stencil) for an HDR-only operation. Creating a Metal `MTLRenderCommandEncoder` with **no attachments** **hard-aborts the Apple GPU (AGX) with Internal Error `0x010c`** — by itself, in its own command buffer, even when that buffer contains no draws. MoltenVK then surfaces the abort as `VK_ERROR_OUT_OF_DEVICE_MEMORY` / `VK_ERROR_DEVICE_LOST`, which read like an OOM but is not one. Because the pass is HDR-only, the freeze was HDR-specific.
 
-**Ruled out this session (2026-06-03) — do not re-chase:**
-- **MSAA / multicore:** NOT the trigger. HDR-on faults identically with 4× MSAA + multicore **or** `mat_antialias 1` + `mat_queue_mode 0`. (Confirms the long-standing user call that these are red herrings — proven from both directions.)
-- **Specific scene features:** NOT a removable feature. Disabling expensive water (`r_waterforceexpensive 0` + `r_WaterDrawReflection/Refraction 0`) still faulted → it's the **core HDR pass** (main scene → FP16 + bloom/tonemap), not water/shadows/an effect.
-- **Resolution:** 1280×720 still faulted (~41 s). Not (solely) a resolution overflow.
-- **`MVK_L4D2_FORCE_PRIVATE_RT=1`** (force transient RTs to Private/device memory): did NOT help — faulted *earlier* (~25 s). The patch post-mortem found the same: Private just adds resident memory and trips the limit sooner. Wired in the launcher (default 0), but **not the fix**.
-- **`MVK_CONFIG_RESUME_LOST_DEVICE=1`** (`L4D2_MVK_RESUME=1`): doesn't freeze, but falls into a **per-frame fault storm** (~180 `0x010c`/s, 13 000+ device re-creations in 60 s) — the "perf/glitch disaster" the patch warns about. Not playable.
-- **`PREFILL` (immediate encoding):** per the launcher notes, only *raises* the threshold and still faults at native res; much slower under Rosetta. Not a fix.
+**The fix (the attachment-less-skip patch).** In MoltenVK's `MVKCommandEncoder::beginMetalRenderPass` (patched), when the render-pass descriptor has **no color/depth/stencil attachment**, **skip creating the render command encoder and return early**. `_mtlRenderEncoder` is already nil (cleared by `endCurrentMetalEncoding`), so any draws recorded into that pass become safe no-ops, and the next *real* render pass re-establishes encoder state normally. The fix is **DEFAULT ON** in the patched dylib; set `L4D2_MVK_SKIP_NOATT=0` to disable it (to reproduce/measure the fault).
 
-**Root-cause understanding (MoltenVK patch post-mortem + this session).** `MTLStorageModeMemoryless` backs transient attachments in **tile memory** — a small pool allocated at render-pass *execution*, separate from device memory. When a pass's combined memoryless footprint exceeds the Apple tile budget, the kernel fails the lazy allocation (`IOGPUSysMemory::withOptions failed`) and aborts as `0x010c` — even with 18 GB free. But forcing Private (off-tile) made it *worse*, so it's better framed as **GPU resource/allocation pressure at the heavy HDR frame**, not a pure tile-budget number. The fault is **opaque** — `Internal Error`, *no encoder, no resource attribution* (`[mvk-l4d2-patch] … has no encoder info`, 2 userInfo keys, only `NSLocalizedDescription = Internal Error`) — so it can't be pinned to a draw/resource from logs. **That opacity is the core difficulty;** the predecessor hit the same wall.
+**Verification (2026-06-04, user-confirmed).**
+- HDR is **playable end-to-end at MAX settings** — 4× MSAA + multicore (`mat_queue_mode -1`) + native 1512×982, with `mat_hdr_level 2`, `mat_fullbright 0`, `mat_dxlevel 100`. The user **played through campaign level 1 and into level 2 with no freeze and no crash**.
+- Automated: **0 `0x010c` faults** across repeated 150-second runs (versus faulting at ~39 s before the fix). **13,000+ attachment-less passes skipped per run** with no visual regression noticed.
+- An occasional **stutter** remains — a performance nit tracked under issue #5 ("60 fps not guaranteed"), **not a blocker**.
 
-**Undocumented fault.** No public cause/fix for `0x010c` / `IOGPUCommandQueueErrorDomain 268` exists. Apple's [WWDC20 "Debug GPU-side errors in Metal"](https://developer.apple.com/videos/play/wwdc2020/10616/) is the only relevant reference; its encoder-attribution path returns "no encoder info" here.
+**How it was pinpointed (the fault is opaque).** The abort is `Internal Error` with **no encoder or resource attribution**, and Apple's three normal channels are all dead here: the kernel unified log gives **no faulting address**, Metal's `MTLCommandBufferErrorOptionEncoderExecutionStatus` returns **"no encoder info"**, and Metal's API/shader validation layer **silently no-ops under Rosetta/Wine**. Attribution came from **custom MoltenVK instrumentation** added in the patch (all gated behind `MVK_L4D2_DEBUG` / `MVK_L4D2_SYNC`, off by default):
+1. **`[mvk-tiledbg]`** logs every render pass's attachment footprint (format, samples, bytes/pixel). This **refuted** the prior tile-memory-budget theory — the heaviest pass is only **36 bytes/pixel** and the main scene is **BGRA8_sRGB**, not FP16 (FP16 appears only in tiny post passes).
+2. **`MVK_L4D2_SYNC`** commits + `waitUntilCompleted` per command buffer to name the exact faulting buffer in lockstep.
+3. A **command-buffer splitter** (`L4D2_MVK_MAX_PASSES`, default off). At N=1 (one render pass per command buffer) + sync, the faulting buffer was unambiguously **the lone attachment-less pass**.
 
-**Untried direction (the next real attempt).** A **pooled-scratch render-target spill** in MoltenVK: when a memoryless attachment would overflow, spill it to a single *reused* device buffer — avoiding both the tile overflow AND the per-resource resident-memory increase that doomed the naive Private attempt. Requires re-cloning MoltenVK + a non-trivial patch + slow rebuild cycles (~10-min dep build per shot), with genuinely uncertain odds. Real fault *attribution* would need Metal frame-capture tooling a Wine game can't easily provide.
+**Ruled out with data — do NOT re-chase these:**
+- **Tile-memory budget** — refuted; the heaviest pass is 36 B/px, far under any plausible tile budget. (The old "memoryless tile overflow" framing was wrong.)
+- **FP16 render targets** — the main scene is BGRA8_sRGB; FP16 appears only in tiny post passes.
+- **MSAA and MSAA resolves** — fault persisted with all resolves disabled; the 4× resolves are shared with the non-faulting LDR path.
+- **Draws / shaders** — fault persisted with **every draw skipped** (the attachment-less buffer has no draws anyway).
+- **Occlusion queries / HDR auto-exposure** — fault persisted with occlusion disabled; the attachment-less pass is **not** the occlusion query.
+- **Per-command-buffer aggregate** — fault persisted at **1 pass per command buffer**.
+- **The attachment-less pass's SIZE** — clamping 16384 → 2048 did **not** help; it is the **existence** of an attachment-less encoder, not its size.
+- **Resolution** — 1280×720 still faulted.
+- **`MVK_L4D2_FORCE_PRIVATE_RT`** — made it worse.
+- **Metal heaps** (`MVK_CONFIG_USE_MTLHEAP=0`) — did not help.
+- **`PREFILL` immediate encoding** — only *raised* the threshold.
+- **`MVK_CONFIG_RESUME_LOST_DEVICE`** — per-frame fault storm.
 
-**Interim mitigations in the patches** (these address *other* fault classes, not the HDR one above):
-- DXVK `pushConstSize` bug fix. `#42`  ·  `robustImageAccess2` on Apple GPUs. `#54`  ·  Null-descriptor fallback.  ·  `MVK_CONFIG_RESUME_LOST_DEVICE=0` so a genuine fault halts cleanly.
+**Undocumented fault.** No public cause/fix for `0x010c` / `IOGPUCommandQueueErrorDomain 268` exists. Apple's [WWDC20 "Debug GPU-side errors in Metal"](https://developer.apple.com/videos/play/wwdc2020/10616/) is the only relevant reference; its encoder-attribution path returns "no encoder info" here — which is why the custom instrumentation above was needed.
 
-**Practical status.** HDR-off is playable (every historical build was secretly HDR-off — see #1). HDR-on freezes at the first heavy frame. **Until this is solved, it's HDR *or* playable, not both.**
+**Patch.** The fix ships in `moltenvk-build/session-patches/moltenvk-all-edits-latest.patch` (regenerated 2026-06-04 — the attachment-less-skip fix plus the instrumentation and the command-buffer splitter). The deployed `libMoltenVK.dylib` is built from it.
+
+**Practical status.** **SOLVED.** HDR is playable end-to-end at max settings; the only residual is the occasional stutter (issue #5).
 
 ---
 
@@ -83,7 +98,7 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
 
 **Symptom.** Framerate is high on the test map (~90–130 fps) but real, busier gameplay (hordes, effects) may dip, and everything runs under Rosetta 2 x86 emulation.
 
-**Status.** Open performance goal. The deferred-encoding path (`PREFILL=0`) is the performant one; the immediate-encoding paths that raise the crash threshold are far too slow (~5 fps).
+**Status.** Open performance goal. The deferred-encoding path (`PREFILL=0`) is the performant one; the immediate-encoding paths that raise the crash threshold are far too slow (~5 fps). During the verified HDR playthrough (2026-06-04, levels 1→2, issue #2 fixed), an **occasional stutter** was observed — a minor perf nit, not a freeze or crash. Tracked here.
 
 ---
 
