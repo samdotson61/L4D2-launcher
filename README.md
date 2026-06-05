@@ -31,7 +31,7 @@ Current baseline: `git HEAD 9a5dedf` (*"working and playable my boy"*, committed
 | Max settings (4× MSAA + multicore + max textures) | **Default, not forced** — the launcher seeds the max baseline on first run; in-game Options → Video changes then persist across restarts (`--max-settings` re-applies max). *(policy revised 2026-06-04, C2)* |
 | **HDR / tonemapping + DX9 shading** | **Playable** — rendering fixed 2026-06-03 (was our own `+mat_hdr_level 1` pin; removed → engine default = full HDR, at DX9.5 `mat_dxlevel 100`); **playability fixed 2026-06-04** — the `0x010c` device-lost was an **attachment-less render pass** (a 16384×16384 pass with zero attachments hard-aborts the AGX GPU), now skipped in patched MoltenVK. User played levels 1→2 with no freeze/crash; 0 faults in 150 s runs. Only residual: an occasional stutter ([issue #5](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). ([issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)) |
 | Flashlight shadow | On (`r_flashlightdepthtexture 1`) — dynamic shadows render |
-| **Online / multiplayer** | **Lobbies work; server-browser browse + join field-confirmed on non-VAC (B5, 2026-06-05)** — online mode + lobby create/join confirmed (2026-06-04); the dedicated-server browser now forwards `ServerResponded` to the engine (a live run re-dispatched 1600+ rows and a non-VAC join started a game) with the `gameserveritem_t` row repacked pack(4)→pack(8). Match filters now forwarded too (B5.1, re-test pending) so a campaign browse filters by mode; official/VAC servers are the B7 gate → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
+| **Online / multiplayer** | **Self-HOST works (now on the correct-gamemode server, B5.1); JOINING does NOT (re-test 2026-06-05).** Online mode + lobby **create** confirmed, and the server browser **populates** (helper forwards `ServerResponded` → engine; 1600+ rows re-dispatched; `gameserveritem_t` repacked pack(4)→pack(8)). But **selecting a browsed non-VAC dedicated server fails to connect**, and the **in-game lobby-browser join also fails** — so join (B5/B6) is the **top open blocker**, and it's **not** the VAC gate. **Diagnosed 2026-06-05:** lobby join succeeds (`LobbyEnter_t`) but the P2P game-handshake is **inbound-dead** (~470 packets sent, **0** received back); a LAN test (both directions) failed with `P2PSessionConnectFail err=4` + zero inbound, isolating the cause: modern Steam runs legacy P2P on the **SDR relay backend**, which the helper never bootstrapped via **`InitRelayNetworkAccess()`**. Fix validated (relay reached "Current") but necessary-not-sufficient — LAN join still times out with 0 inbound, so next is a Proton `lsteamclient` P2P deep-dive. Official/VAC servers are the separate B7 gate → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
 | **Portability (any Apple Silicon Mac)** | Goal — **all six per-machine items (D1–D6) are code-complete** (dylib path, dynamic resolution, Mac-Steam + GPU preflight, computed launcher dir; 2026-06-04). Only **validation** remains: a clean-Mac build + a non-M4 Apple Silicon test → [Phase 2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
 
 ## The stack
@@ -288,13 +288,24 @@ Full list with cause/workaround/status: [03 — Known issues](https://github.com
   confirmed **red herrings**.) The only residual is an occasional stutter (a perf nit). Details:
   [issue #1](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md) ·
   [issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md).
-- **Online multiplayer — lobbies work; dedicated-server browse + join field-confirmed on non-VAC servers (B5, 2026-06-05).** The
-  online plumbing works: the engine reaches Steam "online mode," and lobby create/join now succeed (`result=1` /
-  `resp=1`; the earlier rate-limit was transient). The dedicated-server browser's `ServerResponded` events —
-  previously dropped by the helper — are now queued and forwarded into the engine's response object (a live run
-  re-dispatched 1600+ rows and a non-VAC join started a game), with the `gameserveritem_t` row repacked
-  pack(4)→pack(8). The game's match filters are now forwarded too (B5.1, re-test pending) so a campaign browse
-  filters by mode; official/VAC servers remain the B7 gate. This is **Phase 3**.
+- **Online multiplayer — self-HOST works; JOINING does not (re-test 2026-06-05).** The online plumbing works: the
+  engine reaches Steam "online mode," lobby **create** succeeds (`result=1`; the earlier rate-limit was transient),
+  and the dedicated-server browser **populates** — its `ServerResponded` events, previously dropped by the helper,
+  are now queued and forwarded into the engine's response object (a live run re-dispatched 1600+ rows), with the
+  `gameserveritem_t` row repacked pack(4)→pack(8). **Match filters are now forwarded (B5.1, confirmed)** so
+  **self-hosting lands on a server matching the selected gamemode**. **But the join step is the top open blocker:**
+  selecting a browsed **non-VAC** dedicated server **fails to connect** (B5), and the **in-game lobby-browser join
+  also fails** (B6) — this is *not* the VAC gate. **Diagnosed 2026-06-05:** the lobby join itself succeeds
+  (`LobbyEnter_t`), but L4D2's P2P game-handshake is **inbound-dead** (the client sends ~470 packets and receives
+  **zero** back). **Root cause found (re-test #3):** a LAN test in **both
+  directions** failed with "Session is no longer available" + `P2PSessionConnectFail err=4` (Timeout) + zero
+  inbound — a LAN timeout to a reachable peer rules out NAT, leaving the structural cause: **modern Steam runs
+  even legacy `ISteamNetworking` P2P on the SDR relay backend, which must be started with
+  `InitRelayNetworkAccess()`** — the helper never called it. **Fix validated but necessary-not-sufficient** —
+  `RelayNetworkStatus` reached `100 (Current/ready)`, yet the LAN join still fails (`err=4 Timeout`, 0 inbound), so
+  the structural inbound-receive gap isn't the relay backend. Empirical tweaking has plateaued; the next move is to
+  **deep-research Proton's `lsteamclient` P2P path** (same Wine-game + native-Steam-client architecture).
+  Official/secured servers remain the separate B7 gate. This is **Phase 3**.
 - **Player settings persist (policy revised 2026-06-04).** Max settings is the **first-run default**, not a
   per-launch override: the launcher *seeds* the max baseline into `video.txt`, then **never overwrites a value
   the player changed** in-game — resolution, MSAA, aniso, detail/texture levels (`gpu_level`/`gpu_mem_level`),

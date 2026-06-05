@@ -326,6 +326,12 @@ static int       (*p_Net_CloseP2PSessionWithUser)(void *self, uint64_t steamIDRe
 static int       (*p_Net_CloseP2PChannelWithUser)(void *self, uint64_t steamIDRemote, int channel);
 static int       (*p_Net_GetP2PSessionState)(void *self, uint64_t steamIDRemote, void *pConnectionState);
 static int       (*p_Net_AllowP2PPacketRelay)(void *self, int bAllow);
+// ISteamNetworkingUtils — bootstraps the SDR relay backend that modern Steam
+// runs legacy ISteamNetworking P2P on top of (see init for why this matters).
+static void     *(*p_NetUtils_Get)(void);                 // global accessor v004
+static void      (*p_NetUtils_InitRelayNetworkAccess)(void *self);
+static int       (*p_NetUtils_GetRelayNetworkStatus)(void *self, void *pDetails);
+static void      *g_steam_netutils = NULL;
 static const char *(*p_Friends_GetPersonaName)(void *self);
 static const char *(*p_Friends_GetFriendPersonaName)(void *self, uint64_t steamID);
 static int         (*p_Friends_RequestUserInformation)(void *self, uint64_t steamID, int nameOnly);
@@ -543,6 +549,10 @@ static int load_steam(void) {
     p_Net_CloseP2PChannelWithUser   = load_sym("SteamAPI_ISteamNetworking_CloseP2PChannelWithUser", 0);
     p_Net_GetP2PSessionState        = load_sym("SteamAPI_ISteamNetworking_GetP2PSessionState", 0);
     p_Net_AllowP2PPacketRelay       = load_sym("SteamAPI_ISteamNetworking_AllowP2PPacketRelay", 0);
+    // ISteamNetworkingUtils flat-C (SDR relay bootstrap)
+    p_NetUtils_Get                  = load_sym("SteamAPI_SteamNetworkingUtils_SteamAPI_v004", 0);
+    p_NetUtils_InitRelayNetworkAccess = load_sym("SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess", 0);
+    p_NetUtils_GetRelayNetworkStatus  = load_sym("SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus", 0);
 
     // ISteamMatchmakingServers
     p_MMS_RequestInternetServerList  = load_sym("SteamAPI_ISteamMatchmakingServers_RequestInternetServerList", 0);
@@ -627,6 +637,39 @@ static int load_steam(void) {
     g_steam_utils   = p_FindOrCreateUser(hUser, "SteamUtils009");
     g_steam_friends = p_FindOrCreateUser(hUser, "SteamFriends015");
     g_steam_networking = p_FindOrCreateUser(hUser, "SteamNetworking006");
+    // Enable Steam's relay fallback for P2P. L4D2 routes game traffic over
+    // ISteamNetworking P2P; if the host is NAT'd and no direct route opens,
+    // without relay the client receives ZERO inbound packets
+    // (IsP2PPacketAvailable stays false forever) and the join silently hangs —
+    // the failure diagnosed 2026-06-05 (lobby enters OK, then 470 sends / 0
+    // reads). Relay routes via Steam's network so the handshake can complete.
+    if (g_steam_networking && p_Net_AllowP2PPacketRelay) {
+        int rly = p_Net_AllowP2PPacketRelay(g_steam_networking, 1) ? 1 : 0;
+        // stderr (not stdout) so it lands in helper.log under --diag-online.
+        fprintf(stderr, "[helper] AllowP2PPacketRelay(true) -> %d\n", rly);
+    } else {
+        fprintf(stderr, "[helper] AllowP2PPacketRelay NOT applied (networking=%p sym=%p)\n",
+                g_steam_networking, (void*)p_Net_AllowP2PPacketRelay);
+    }
+    // Bootstrap the SDR relay backend. Modern Steam implements even the LEGACY
+    // ISteamNetworking P2P on top of SteamNetworkingSockets/SDR; until
+    // InitRelayNetworkAccess() kicks that off, no P2P route can establish — every
+    // session times out (EP2PSessionError=4 Timeout) with zero inbound, even on a
+    // LAN. This is the diagnosed 2026-06-05 join failure, and is distinct from the
+    // old AllowP2PPacketRelay toggle above. Status reaches "Current"(100) a few
+    // seconds later; we log it on the first P2P send.
+    if (p_NetUtils_Get) {
+        g_steam_netutils = p_NetUtils_Get();
+        if (g_steam_netutils && p_NetUtils_InitRelayNetworkAccess) {
+            p_NetUtils_InitRelayNetworkAccess(g_steam_netutils);
+            fprintf(stderr, "[helper] InitRelayNetworkAccess() called (SDR relay bootstrap)\n");
+        } else {
+            fprintf(stderr, "[helper] InitRelayNetworkAccess NOT applied (utils=%p sym=%p)\n",
+                    g_steam_netutils, (void*)p_NetUtils_InitRelayNetworkAccess);
+        }
+    } else {
+        fprintf(stderr, "[helper] SteamNetworkingUtils accessor missing — cannot bootstrap SDR relay\n");
+    }
     g_steam_mm_servers = p_FindOrCreateUser(hUser, "SteamMatchMakingServers002");
     // ISteamGameServer for listen-server auth validation.  We try multiple
     // version strings since Mac Steam may have different ones registered.
@@ -1054,7 +1097,32 @@ static int handle_one(int fd) {
         memcpy(&channel, args + 16, 4);
         const void *pubData = args + 20;
         if (alen < 20 + cb) cb = alen - 20;
-        return send_u32(fd, p_Net_SendP2PPacket(g_steam_networking, sid, pubData, cb, (int)eP2PSend, (int)channel) ? 1 : 0);
+        // One-shot: is the SDR relay backend ready by the time P2P first runs?
+        // (100 Current = ready; 2 Attempting / 1 Waiting = not yet → expect timeouts.)
+        static int s_relay_logged = 0;
+        if (!s_relay_logged && g_steam_netutils && p_NetUtils_GetRelayNetworkStatus) {
+            int avail = p_NetUtils_GetRelayNetworkStatus(g_steam_netutils, NULL);
+            hlog("[helper] RelayNetworkStatus at first P2P send = %d (%s)\n", avail,
+                 avail==100 ? "Current/ready" : avail==2 ? "Attempting" :
+                 avail==1 ? "Waiting" : avail<0 ? "Failed/CannotTry" : "NeverTried");
+            s_relay_logged = 1;
+        }
+        int ok = p_Net_SendP2PPacket(g_steam_networking, sid, pubData, cb,
+                                     (int)eP2PSend, (int)channel) ? 1 : 0;
+        // Join-hang diag: is real Steam ACCEPTING our sends, and to whom?
+        // Throttled — log the first send to each new peer, every rejection, and
+        // a periodic tally (the engine fires hundreds of handshake packets).
+        static uint64_t s_last_sid = 0; static int s_sends = 0, s_fails = 0;
+        if (sid != s_last_sid || !ok) {
+            hlog("[helper] SendP2PPacket -> sid=%llu cb=%u type=%u chan=%u = %d%s\n",
+                 (unsigned long long)sid, cb, eP2PSend, channel, ok,
+                 ok ? "" : " (REJECTED by Steam)");
+            s_last_sid = sid;
+        }
+        s_sends++; if (!ok) s_fails++;
+        if ((s_sends % 200) == 0)
+            hlog("[helper] SendP2PPacket tally: %d sent, %d rejected\n", s_sends, s_fails);
+        return send_u32(fd, ok);
     }
 
     case OP_NET_ISP2PPACKETAVAILABLE: {
@@ -1062,6 +1130,12 @@ static int handle_one(int fd) {
         uint32_t channel; memcpy(&channel, args, 4);
         uint32_t cubMsgSize = 0;
         int avail = p_Net_IsP2PPacketAvailable(g_steam_networking, &cubMsgSize, (int)channel);
+        // Join-hang diag: shout the instant ANY inbound packet first appears —
+        // this is the signal we've never seen. Logged once per availability edge.
+        static int s_was_avail = 0;
+        if (avail && !s_was_avail)
+            hlog("[helper] *** INBOUND P2P AVAILABLE *** size=%u chan=%u\n", cubMsgSize, channel);
+        s_was_avail = avail ? 1 : 0;
         uint32_t resp[2] = { (uint32_t)(avail ? 1 : 0), cubMsgSize };
         return send_resp(fd, 0, resp, sizeof resp);
     }
@@ -1077,6 +1151,11 @@ static int handle_one(int fd) {
         uint32_t cubMsgSize = 0;
         uint64_t steamIDRemote = 0;
         int ok = p_Net_ReadP2PPacket(g_steam_networking, body, cubDest, &cubMsgSize, &steamIDRemote, (int)channel);
+        // Join-hang diag: confirm real inbound data + who it's from (throttled).
+        static int s_reads = 0;
+        if (ok && (s_reads++ % 50) == 0)
+            hlog("[helper] ReadP2PPacket <- sid=%llu size=%u chan=%u (inbound #%d)\n",
+                 (unsigned long long)steamIDRemote, cubMsgSize, channel, s_reads);
         uint32_t okU = ok ? 1 : 0;
         memcpy(blob, &okU, 4);
         memcpy(blob + 4, &cubMsgSize, 4);
@@ -1390,7 +1469,15 @@ static int handle_one(int fd) {
         MM_REQUIRE(p_MM_GetLobbyOwner);
         if (alen < 8) return send_err(fd, 1);
         uint64_t lobby; memcpy(&lobby, args, 8);
-        return send_u64(fd, p_MM_GetLobbyOwner(g_steam_matchmaking, lobby));
+        uint64_t owner = p_MM_GetLobbyOwner(g_steam_matchmaking, lobby);
+        // Join-hang diag: confirm the P2P send target == the real lobby host.
+        static uint64_t s_last_owner = 0;
+        if (owner != s_last_owner) {
+            hlog("[helper] GetLobbyOwner(lobby=%llu) -> owner sid=%llu\n",
+                 (unsigned long long)lobby, (unsigned long long)owner);
+            s_last_owner = owner;
+        }
+        return send_u64(fd, owner);
     }
 
     case OP_MM_SETLOBBYJOINABLE: {
@@ -1549,6 +1636,26 @@ static int handle_one(int fd) {
                 // 304 PersonaStateChange) actually arrive from the Mac
                 // client.  Whether 101 is ever emitted is the core B1 unknown.
                 hlog("[helper] real cb id=%u dlen=%u\n", id, dlen);
+
+                // Join-hang diag: decode the P2P session callbacks so we know
+                // WHY a join fails. P2PSessionConnectFail_t (1203) carries an
+                // EP2PSessionError byte; P2PSessionRequest_t (1202) means a peer
+                // wants to talk to US (inbound — never seen so far).
+                if (id == 1203 && msg.m_pubParam && dlen >= 9) {
+                    uint64_t rem; memcpy(&rem, msg.m_pubParam, 8);
+                    unsigned err = ((const uint8_t*)msg.m_pubParam)[8];
+                    hlog("[helper] P2PSessionConnectFail remote sid=%llu err=%u (%s)\n",
+                         (unsigned long long)rem, err,
+                         err==2 ? "NoRightsToApp" :
+                         err==4 ? "Timeout/NAT — open outbound UDP 3478/4379/4380" :
+                         err==0 ? "None" : err==1 ? "NotRunningApp" :
+                         err==3 ? "DestNotLoggedIn" : "other");
+                }
+                if (id == 1202 && msg.m_pubParam && dlen >= 8) {
+                    uint64_t rem; memcpy(&rem, msg.m_pubParam, 8);
+                    hlog("[helper] P2PSessionRequest from sid=%llu (INBOUND — accept it!)\n",
+                         (unsigned long long)rem);
+                }
 
                 if (id == 703 && p_ManualDispatch_GetAPICallResult && dlen >= 16 && msg.m_pubParam) {
                     // SteamAPICallCompleted_t — fetch the real result.

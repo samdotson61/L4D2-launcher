@@ -310,30 +310,45 @@ M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` file
 
 # Phase 3 — Online multiplayer: join official Steam games
 
-> **Status: IN PROGRESS — lobbies WORK; dedicated-server browse + join FIELD-CONFIRMED 2026-06-05 on non-VAC
-> servers; match-filter forwarding (B5.1) IMPLEMENTED, re-test pending. Official servers are the VAC gate
-> (B7).** Phases 1 (shading) and 2 (portability) are complete. Progress via `--diag-online` captures:
-> - **B1–B4 (lobby path) — proven 2026-06-04.** Online mode is reached (`BLoggedOn()=1`,
->   `GetConnectedUniverse()=1`), `RequestLobbyList` returns 50 real lobbies, and once the earlier rate-limit
->   cleared (it was **transient** — from repeated testing), **`CreateLobby` returns `result=1` with a real
->   lobby and lobby joins return `resp=1` (Success)**. Local/online server creation from the menu works.
->   `SteamServersConnected_t` (101) was never even needed.
-> - **B5 (dedicated servers) — root cause found 2026-06-04; fix IMPLEMENTED + FIELD-CONFIRMED 2026-06-05.**
->   The server browser was empty because the helper's `ISteamMatchmakingServerListResponse` was a **no-op**:
->   real Steam finds servers (`helper.log`: `noop_ServerResponded iServer=0..22+`) but the events were dropped,
->   and the L4D2 engine **waits on those callbacks** — it never calls `GetServerCount`/`GetServerDetails`. The
->   fix now **forwards** `ServerResponded`/`ServerFailedToRespond`/`RefreshComplete` to the game's response
->   object — the helper queues each (mutex-guarded; Steam fires them off-thread) → ships a `0xFFFFFFFD` drain
->   envelope → the bridge re-dispatches into the game's vtable via a new 2-arg `__thiscall` trampoline
->   (`thiscall_run2`) — **and converts `gameserveritem_t` pack(4)→pack(8)** in `GetServerDetails` (the second
->   bug). **Field test 2026-06-05:** browser populated (1600+ rows re-dispatched, `op=0x0707 GetServerDetails`
->   now called), and a non-VAC dedicated join started a game. Open: **filters are dropped** so the browser is
->   unfiltered (B5.1), and **official = VAC** (B7). **Approach validated against Proton's `lsteamclient`
->   (deep-research 2026-06-04)** — it does exactly
->   this (`CALL_IFACE_VTABLE_0_SERVER_RESPONDED`). Both binaries build clean; `thiscall_run2` was verified
->   under Wine (correct args + balanced stack), the `gameserveritem_t` offsets confirmed by compiling the SDK
->   header (372/`m_steamID`@364 macOS → 376/@368 Windows), and the drain envelope verified by round-trip test.
->   Remaining: a live field test (`connect <ip>` + browser populates with a friend / real servers). See B5.
+> **Status: IN PROGRESS — self-HOST works (and now picks the correct-gamemode server); JOINING does NOT.**
+> *(corrected after a follow-up 2026-06-05 re-test)* What works: lobby **create**, online mode, server-browser
+> **populate**, and **self-hosting a match on a server matching the selected gamemode** (B5.1 filter forwarding
+> CONFIRMED). What's **broken / now the top blocker**: the **join** step — both **dedicated-server browser join**
+> (B5) and **in-game lobby-browser join** (B6) **fail to connect**, on **non-VAC** servers (so this is *not* the
+> B7/VAC gate). The earlier same-day "non-VAC join started a game" claim is **superseded** — treat B5 join as
+> OPEN. Official/secured servers remain separately the VAC gate (B7). Phases 1 (shading) and 2 (portability) are
+> complete.
+>
+> **ROOT CAUSE of the join failure (diagnosed 2026-06-05): the P2P game-handshake is inbound-dead.** The lobby
+> layer works (`JoinLobby` → `LobbyEnter_t bFailed=0`), but L4D2's `ISteamNetworking` P2P game connection only
+> goes one way — **470 SendP2PPacket out, 5156 availability-polls, 0 ReadP2PPacket, 0 inbound** (no `1202`/`1203`
+> either). The host never replies. **Relay fix applied but did NOT resolve it (re-test #1):** the send path is
+> now confirmed correct (742 packets accepted to the **real** lobby host), yet inbound is still 0 and Steam
+> returns **`P2PSessionConnectFail_t` (1203)**. The 1203 error byte (decode now added) decides it: **`2
+> NoRightsToApp`** (bridge app-identity, fixable) vs **`4 Timeout/NAT`** (firewall/relay). **Re-test #2 pending**
+> for that byte. Full analysis in [B6](#b6-join-a-friends-game--lobby--join-game)
+> and [07-debugging.md](07-debugging.md#p2p-join-handshake-phase-3--b6-diagnostics). Progress via `--diag-online`
+> captures:
+> - **B1–B4 (lobby path) — lobby CREATE proven 2026-06-04; lobby JOIN fails in field (2026-06-05).** Online mode
+>   is reached (`BLoggedOn()=1`, `GetConnectedUniverse()=1`), `RequestLobbyList` returns 50 real lobbies, and
+>   **`CreateLobby` returns `result=1`** (the earlier rate-limit was transient). But in-game **joining** a
+>   browsed lobby does **not** connect (B6). *(The earlier `resp=1` on a JoinLobby call did not translate to a
+>   playable connected session — see B6.)*
+> - **B5 (dedicated servers) — forwarding + populate WORK; JOIN is OPEN.** The server browser was empty because
+>   the helper's `ISteamMatchmakingServerListResponse` was a **no-op**: real Steam finds servers (`helper.log`:
+>   `noop_ServerResponded iServer=0..22+`) but the events were dropped, and the L4D2 engine **waits on those
+>   callbacks** — it never called `GetServerCount`/`GetServerDetails`. The fix now **forwards**
+>   `ServerResponded`/`ServerFailedToRespond`/`RefreshComplete` to the game's response object (helper queues each,
+>   mutex-guarded → `0xFFFFFFFD` drain envelope → bridge re-dispatches via the 2-arg `__thiscall` trampoline
+>   `thiscall_run2`), **and converts `gameserveritem_t` pack(4)→pack(8)** in `GetServerDetails`. **Result
+>   (2026-06-05):** the browser now **populates** (1600+ rows re-dispatched, `op=0x0707 GetServerDetails` now
+>   called) — but a **follow-up re-test found selecting a non-VAC server fails to connect**, so the
+>   populate→select→**connect** join is **broken/unconfirmed** (the earlier same-day "join started a game" is
+>   superseded). **Approach validated against Proton's `lsteamclient`** (deep-research 2026-06-04) —
+>   `CALL_IFACE_VTABLE_0_SERVER_RESPONDED`; both binaries build clean; `thiscall_run2` Wine-verified; offsets
+>   confirmed by compiling the SDK header (372/`m_steamID`@364 macOS → 376/@368 Windows). See B5.
+> - **B5.1 (gamemode filters) — CONFIRMED 2026-06-05.** Filters now forwarded to real Steam; **self-hosting lands
+>   on a server matching the selected gamemode** (the mode-mismatch that bit the first B5 test is gone). See B5.1.
 
 **Milestone:** first end-to-end proof = listen-server + friend-join; then join official servers via the
 browser/lobby. (Issues #6, #7.)
@@ -423,7 +438,18 @@ synthetic `GSClientApprove` already exists; verify a friend can **join a locally
 friend connects to a game you host and play proceeds.
 
 ### B5. Join an official dedicated server via the server browser
-> **FIELD-TESTED 2026-06-05 — the server browser populates and joins succeed on non-VAC servers.** A live run
+> **⚠️ STATUS CORRECTED — FOLLOW-UP RE-TEST 2026-06-05 (later): dedicated-browser JOIN does NOT work.** A
+> re-test after [B5.1](#b51-forward-the-server-list-match-filters) landed found that **selecting a server in the
+> in-game browser fails to connect.** The servers tried were **not** VAC/official, so this is **not** the
+> [B7](#b7-auth--vac-safety-gate-clear-before-any-secured-server--applies-throughout) gate. What *does* work now:
+> **self-hosting a match correctly lands on a server matching the selected gamemode** — so B5.1's filter plumbing
+> is effectively confirmed on the **create/host** path. The browser still **populates** (the `ServerResponded`
+> forwarding below is genuine), but the **populate → select → connect** join is **broken/unconfirmed** and needs a
+> fresh `--diag-online` capture to root-cause. **In-game lobby-browser join also fails** (see
+> [B6](#b6-join-a-friends-game--lobby--join-game)). Net: treat **B5 dedicated-server join as OPEN, not done** —
+> the earlier same-day "join started a game" note below is **superseded** and kept only for history.
+>
+> **(Earlier same-day note — NOW IN QUESTION, kept for history.) The server browser populates; an earlier run *appeared* to join a non-VAC server.** A live run
 > confirmed the full path end to end: `helper.log` logged `shipped N server-response envelope(s)` repeatedly,
 > the bridge re-dispatched 1600+ rows (`mms_resp: fake=1 type=0 iServer=…1672`), and — the decisive proof — the
 > engine then called `GetServerDetails` (`op=0x0707`), which it **never did before**. The user **joined an
@@ -498,8 +524,11 @@ friend connects to a game you host and play proceeds.
 
 `RequestInternetServerList` now forwards real server rows into the game's `ISteamMatchmakingServerListResponse`
 — the helper's former **no-op** `ServerResponded` vtable now queues and delivers real results (via the
-`0xFFFFFFFD` envelope path above), **field-confirmed 2026-06-05** (browse populates, join works on non-VAC).
-Joining a **secured** server is **gated by B7** (VAC).
+`0xFFFFFFFD` envelope path above) — **browse populate is field-confirmed 2026-06-05**, but **dedicated-server
+join is OPEN**: a follow-up re-test the same day found selecting a **non-VAC** server in the browser **fails to
+connect** (so it is *not* the B7/VAC gate). Self-hosting works and lands on the correct-gamemode server; the
+populate→select→connect join needs a fresh `--diag-online` capture. Joining a **secured** server is separately
+**gated by B7** (VAC).
 
 ### B5.1 Forward the server-list match filters
 The 2026-06-05 field test surfaced this: `mms_RequestInternetServerList` had **dropped** the game's
@@ -523,15 +552,129 @@ forwarded end to end:
 > valid ones, e.g. `gamedir`, = pre-B5.1 behaviour). A native contiguous-read unit test passes (3 real filters +
 > a garbage one correctly skipped).
 
-**Verification:** builds clean; serialize→parse and contiguous-read unit tests pass. **Remaining:** re-test in
-game — `helper.log` should now show `MMS filter[1]=gametype=…` etc. as **clean** keys (not garbage), and a
-campaign browse should list **only** campaign-capable servers. (Friends/Favorites/History/Spectator lists stay
-filterless — Internet is L4D2's campaign path.)
+**Verification:** builds clean; serialize→parse and contiguous-read unit tests pass. **RE-TESTED IN GAME
+2026-06-05 — filter forwarding CONFIRMED working.** Selecting a gamemode now drives discovery to servers of that
+mode: **self-hosting correctly lands on a server matching the selected gamemode** (the mode-mismatch bug that
+bit the original B5 test is gone). The filter plumbing (`gamedir`/`gametype`/…) reaches real Steam cleanly. The
+**separate, still-open issue** is that **joining** a browsed dedicated server fails to connect (tracked under
+[B5](#b5-join-an-official-dedicated-server-via-the-server-browser)) — that is *not* a filter problem.
+(Friends/Favorites/History/Spectator lists stay filterless — Internet is L4D2's campaign path.)
 
 ### B6. Join a friend's game — lobby / "Join Game"
 Test the Steam-overlay/friends **Join Game** flow and the in-game lobby browser (`RequestLobbyList` →
 `JoinLobby` → P2P to host). The pack(4)→pack(8) callback repack and the matchmaking callback gate are
 already in place; verify timing end-to-end.
+
+> **FIELD-TESTED 2026-06-05 — in-game lobby-browser JOIN fails.** Browsing lobbies works
+> (`RequestLobbyList` returns real lobbies, B1–B4), but actually **joining** one via the in-game lobby browser
+> does **not** connect. This sits alongside the dedicated-browser join failure
+> ([B5](#b5-join-an-official-dedicated-server-via-the-server-browser)) — both are the **populate→select→connect
+> "join" step**, which is now the **top open MP blocker**. Only the **self-host / create** path works end to end
+> (and now picks the correct-gamemode server, B5.1). Friends-list "Join Game" not yet separately tested.
+>
+> **ROOT CAUSE DIAGNOSED 2026-06-05 (`--diag-online` capture) — the P2P game-handshake is inbound-dead.** The
+> lobby/matchmaking layer is **not** the problem: the capture shows `JoinLobby` (`op=0x0503`) → real Steam
+> delivers **`LobbyEnter_t` (cb 504, `bFailed=0`)** → the engine immediately starts the peer-to-peer game
+> connection. L4D2 runs game traffic over **`ISteamNetworking` P2P** (old `SteamNetworking006`), and that
+> handshake **only goes one way**:
+> | P2P op | count | meaning |
+> |---|---|---|
+> | `0x0600` SendP2PPacket | **470** | client transmits 80-byte handshake packets to the host |
+> | `0x0601` IsP2PPacketAvailable | **5156** | polls for inbound, constantly |
+> | `0x0602` ReadP2PPacket | **0** | **never received a single packet back** |
+> | `0x0603` AcceptP2PSessionWithUser | **0** | no inbound session ever offered |
+>
+> No `P2PSessionRequest_t` (1202) and no `P2PSessionConnectFail_t` (1203) were delivered — Steam didn't report a
+> *failure*, it just delivered **nothing inbound**. Ruled out: the receive proxy is correct (it faithfully
+> returns real Steam's "nothing available"), and the `gameserveritem_t` pack(4)→pack(8) repack is correct (only
+> the trailing `CSteamID` shifts). So the host never replies to our sends — the **common blocker for both lobby
+> and dedicated joins** (both reach this same game-channel handshake).
+>
+> **FIX APPLIED 2026-06-05 — enable Steam's P2P relay fallback.** The capture showed `AllowP2PPacketRelay`
+> (`0x0607`) was **never called**, so a host we can't reach by a direct route had no relay path → zero inbound,
+> silent hang. The helper now calls **`AllowP2PPacketRelay(true)` once at networking init** (right after
+> acquiring `SteamNetworking006`). Added alongside, **diagnostics** to confirm on re-test: `SendP2PPacket` now
+> logs its **target sid + byte count + return value** (is Steam *accepting* the sends, and to whom?), and
+> `GetLobbyOwner` logs the resolved host sid (does the P2P target == the real lobby host?). Helper rebuilt clean
+> (`clang -arch arm64 -O2 -Wall`). **Re-test pending:** a `--diag-online` lobby join — expect either inbound
+> packets to start flowing (`0x0602 > 0`, join completes) or, if not, the new logs pin it to send-rejection vs.
+> wrong-target vs. relay-still-insufficient. See [07-debugging.md → P2P join diagnostics](07-debugging.md#p2p-join-handshake-phase-3--b6-diagnostics).
+>
+> **RE-TEST #1 result 2026-06-05 — send path CONFIRMED correct; relay did NOT fix inbound; Steam reports
+> `P2PSessionConnectFail_t`.** The instrumentation paid off: after the first ~20 packets to `sid=0` (transient,
+> pre-membership, correctly REJECTED), **all sends go to real peer SteamIDs and return `= 1` (accepted)** — and
+> the target matches `GetLobbyOwner` (`...241`). So we transmit to the **right** hosts and Steam **accepts** the
+> sends (742 sent / 20 rejected). **But inbound is still 0** (`ReadP2PPacket = 0` over 1217 availability polls),
+> and this time real Steam delivered **`P2PSessionConnectFail_t` (cb 1203)** — i.e. Steam *tried* the session and
+> **failed**. That callback's `EP2PSessionError` byte is the smoking gun, but the helper wasn't dumping it.
+> **Added (built clean):** a 1203 decode (`NoRightsToApp(2)` vs `Timeout/NAT(4)` — `NotRunningApp(1)`/`DestNotLoggedIn(3)`
+> were removed from the SDK and "will never be sent"), a 1202 inbound-request log, and the relay confirmation moved
+> to **stderr** (the earlier `printf` went to stdout, which `helper.log` doesn't capture — so relay-enabled was
+> never actually confirmed). **Re-test #2 pending** — one `--diag-online` join will print the exact error code:
+> **err=2 → app-identity/ownership bug in the bridge (fixable here); err=4 → genuine NAT/relay (UDP
+> 3478/4379/4380, harder).** This is now the single deciding fact.
+>
+> **RE-TEST #2 result 2026-06-05 — relay CONFIRMED on; inbound failure is SYSTEMATIC, not per-peer.** Startup now
+> logs `AllowP2PPacketRelay(true) -> 1` (symbol loaded, relay genuinely enabled). The join was exercised hard: **4
+> lobby joins, 14+ distinct real peers, ~153 accepted sends each (2349 total, only the transient `sid=0` ones
+> rejected) — and 0 inbound from every single peer** (`ReadP2PPacket = 0`). No `1203` fired this run (it's
+> intermittent — 1 in 3 runs), so the error byte is still uncaptured. **Reassessment:** a **universal 0% inbound
+> rate across 14 peers / 4 lobbies with relay ON** is not the signature of per-peer NAT (which is probabilistic and
+> relay is meant to defeat). Two hypotheses remain: **(a) structural** — the bridge cannot receive P2P from the Mac
+> Steam client *at all* (would explain why solo-hosting works but anything needing inbound never does); **(b)
+> legacy-relay** — old `ISteamNetworking`'s P2P relay is deprecated in favour of SDR and silently fails to traverse
+> NAT. **Decider = a LAN / same-network test** (removes NAT): inbound works on LAN but not internet ⇒ (b)
+> relay/NAT; fails even on LAN ⇒ (a) structural bridge-receive bug. The host-side inbound logs (`P2PSessionRequest
+> from sid=…`, `ReadP2PPacket`) make either outcome conclusive. **Solo log analysis has reached its limit — the
+> next step needs a second peer (friend-join-your-host) or a LAN game.**
+>
+> **RE-TEST #3 result 2026-06-05 — ROOT CAUSE FOUND: the SDR relay backend was never bootstrapped.** A two-machine
+> test **on the same LAN, in both directions** (Mac hosts / Mac joins) — **both failed** with the in-game
+> **"Session is no longer available"**, and the capture finally pinned it: **`P2PSessionConnectFail err=4`
+> (`k_EP2PSessionErrorTimeout`)** with **still zero inbound** (the `*** INBOUND P2P AVAILABLE ***` beacon never
+> fired; no `1202`, no `ReadP2PPacket`). **A LAN timeout with a known-reachable peer rules out NAT *and* legacy
+> relay** — so this is the **structural** case. Root cause: **modern Steam implements even the legacy
+> `ISteamNetworking` P2P on top of the SteamNetworkingSockets / SDR relay backend, and that backend must be
+> bootstrapped with `SteamNetworkingUtils()->InitRelayNetworkAccess()`** — which the helper **never called** (only
+> the unrelated old `AllowP2PPacketRelay` toggle). Without the bootstrap, no P2P route can form → every session
+> times out with zero inbound, even on a LAN. This single omission fits **every** symptom across re-tests #1–3
+> (sends accepted but never delivered, 0 inbound, err=4, LAN failure, relay-toggle no-op).
+>
+> **FIX APPLIED + built (re-test #4 pending):** the helper now acquires `ISteamNetworkingUtils`
+> (`SteamAPI_SteamNetworkingUtils_SteamAPI_v004`) and calls **`InitRelayNetworkAccess()`** right after acquiring
+> the networking interface, and logs `RelayNetworkStatus` on the first P2P send (expect it to reach **`100`
+> Current/ready**; `2 Attempting` at send time would mean we sent too early). Symbol confirmed present in the Mac
+> `libsteam_api.dylib`. **Re-test #4:** repeat the LAN join — success looks like the inbound beacon firing and the
+> session connecting; if it still times out, the status log says whether the relay reached Current.
+>
+> **RE-TEST #4 result 2026-06-05 — relay fix VALIDATED; new host-side crash revealed.** Startup logged
+> `InitRelayNetworkAccess() called` and the first P2P send logged **`RelayNetworkStatus = 100 (Current/ready)`** —
+> the SDR backend now initializes correctly, confirming the fix. **New behavior:** with the relay up, **hosting +
+> a remote LAN join now CRASHES the game** (in-game "Session is no longer available" had been the *join* side;
+> hosting previously did nothing). The bridge trace shows the host path advancing further than ever: lobby created
+> (`LobbyCreated_t result=1`), the game **registers the inbound P2P listener** (`cb_register id=1202`), the joiner
+> appears (`LobbyChatUpdate_t`/506) — and the process **dies right at `drain: fire id=506`**, before any P2P
+> (inbound still 0). So the relay unblocked the connect path and exposed a **host-side member-join crash**.
+> `game-stderr.log` wasn't captured (`--diag-online` alone doesn't write it), so the Wine backtrace is missing.
+> **Next:** reproduce the host-join crash under **`--diag --diag-online`** (they stack — `--diag` captures the Wine
+> crash backtrace to `game-stderr.log`, `--diag-online` keeps the bridge/helper P2P trace), then read the faulting
+> module/frame to localize the crash (Source engine vs. bridge callback dispatch vs. Wine/MVK). The Mac-joins-Windows
+> direction still returns "Session is no longer available" (its inbound P2P is the same path, gated behind this crash
+> on the host side).
+>
+> **RE-TEST #5 result 2026-06-05 — relay was NECESSARY-not-SUFFICIENT; inbound P2P still dead; crash is
+> intermittent.** A clean run (no crash this time, both machines — so the host-join crash is an intermittent race in
+> the member-join path, not the steady-state failure). With relay confirmed ready (`RelayNetworkStatus = 100`), the
+> Mac→Windows join **still** fails identically: `P2PSessionConnectFail err=4 (Timeout)`, **0 inbound** (no beacon,
+> no `1202`, `ReadP2PPacket=0`), sends accepted to the correct host. So `InitRelayNetworkAccess` fixed the relay
+> *status* but **not** the actual P2P connectivity — the structural inbound-receive gap is real and is **not**
+> explained by the SDR backend. **Empirical tweaking has plateaued** (target, send-accept, AllowP2PPacketRelay, and
+> SDR bootstrap all addressed; inbound still 0 on a LAN). **Next move: deep-research Proton's `lsteamclient` P2P
+> path** — it runs Windows Source-game P2P on the identical "Wine game + native Steam client + proxy" architecture,
+> so its handling of `ReadP2PPacket` / `P2PSessionRequest_t` / identity is the most likely source of the missing
+> piece (this is exactly how the B5 server-browser fix was found). Optional quick parallel data point: re-run with
+> **`-condebug`** (`./play-l4d2.sh --diag-online -- -condebug`) to capture the Source engine's own netchannel reason
+> for "Session is no longer available" in `console.log`.
 
 ### B7. Auth / VAC safety gate (clear before any secured server — applies throughout)
 **Cross-cutting, not a final step.** The bridge uses the host's **real** auth ticket and **real SteamID**

@@ -71,6 +71,78 @@ the browser populates with **mode-matching** servers. If the helper queues but t
 handle`, the request-handle mapping is off; if `shipped` stays 0 while the helper keeps queueing, the drain
 isn't reaching `OP_DRAIN_CALLBACKS`. See [08-roadmap.md B5](08-roadmap.md#b5-join-an-official-dedicated-server-via-the-server-browser).
 
+## P2P join-handshake (Phase 3 / B6) diagnostics
+
+Once the lobby/server layer works, the **join** still depends on L4D2's peer-to-peer game connection
+(`ISteamNetworking` / `SteamNetworking006`). Under `--diag-online`, trace it by the P2P op counts in
+`helper.log`:
+
+```bash
+grep -oE 'op=0x060[0-9]' helper.log | sort | uniq -c    # P2P op histogram
+```
+
+| Op | Call | Healthy join | Inbound-dead (the 2026-06-05 bug) |
+|---|---|---|---|
+| `0x0600` | SendP2PPacket | many out | many out (470) |
+| `0x0601` | IsP2PPacketAvailable | polled | polled (5156) |
+| `0x0602` | **ReadP2PPacket** | **> 0** | **0 — never a packet back** |
+| `0x0603` | AcceptP2PSessionWithUser | ≥1 | 0 |
+
+**Read it like this:** `SendP2PPacket > 0` but `ReadP2PPacket == 0` = the client transmits but the host never
+replies → the handshake never completes → join hangs. Cross-check the callback side: a successful lobby entry
+is `real cb id=504` (`LobbyEnter_t`, `bFailed=0`) in `helper.log`; the **absence** of `real cb id=1202`
+(`P2PSessionRequest_t`) is expected on the *initiating* side, and the absence of `1203`
+(`P2PSessionConnectFail_t`) means Steam reported no failure — it just delivered nothing.
+
+**New log lines (added 2026-06-05) to pin the cause:**
+- `[helper] AllowP2PPacketRelay(true) -> 1` — at startup; confirms the relay fallback is enabled (the fix).
+- `[helper] SendP2PPacket -> sid=… cb=… type=… chan=… = 1` — first send to each peer + every rejection. `= 0
+  (REJECTED by Steam)` means real Steam refused the send (bad target/interface); `= 1` means it was accepted
+  (so the problem is downstream — routing/relay/host). A periodic `SendP2PPacket tally: N sent, M rejected`.
+- `[helper] GetLobbyOwner(lobby=…) -> owner sid=…` — the resolved host SteamID; confirm it matches the
+  `SendP2PPacket` target (a mismatch = we're transmitting to the wrong peer).
+- `[helper] P2PSessionConnectFail remote sid=… err=N (…)` — **the decisive line.** Steam tried the P2P session
+  and failed; `err` names why: **`2 NoRightsToApp`** = app-ownership/identity problem in the bridge (fixable
+  here); **`4 Timeout/NAT`** = the peer never responded / firewall (needs outbound UDP 3478/4379/4380, harder).
+  `1 NotRunningApp` and `3 DestNotLoggedIn` were removed from the SDK and won't appear.
+- `[helper] P2PSessionRequest from sid=… (INBOUND …)` — a peer wants to talk to **us**. Never seen yet; its
+  appearance would mean inbound P2P finally reached the bridge.
+- `[helper] *** INBOUND P2P AVAILABLE *** size=… chan=…` — fires the **instant any inbound packet first
+  appears** (availability rising edge). This is the never-seen signal; if it prints, the receive path works.
+- `[helper] ReadP2PPacket <- sid=… size=… (inbound #N)` — actual inbound data read, with the sender (throttled).
+
+### Two-peer inbound test (the structural-vs-NAT decider)
+
+Solo testing can't prove whether the bridge can *receive* P2P at all. Use a second account/machine — **on the
+same LAN if possible** (removes NAT, the key control):
+
+- **Test A — Mac hosts, peer joins:** on the Mac `./play-l4d2.sh --diag-online`, start a lobby/local server;
+  from the second machine, join it.
+- **Test B — peer hosts, Mac joins:** second machine hosts; on the Mac `--diag-online`, join it.
+
+After either, on the Mac:
+```bash
+grep -E 'INBOUND P2P AVAILABLE|ReadP2PPacket <-|P2PSessionRequest from' helper.log
+```
+**Any** of those lines ⇒ the bridge **can** receive P2P → the internet-join failure is NAT/legacy-relay
+(hypothesis b). **None**, even on LAN ⇒ the bridge **cannot** receive at all → structural receive bug
+(hypothesis a), fix is in the helper's networking init/receive path.
+
+> **Outcome (2026-06-05): hypothesis (a) confirmed, root cause found.** The LAN test failed both directions with
+> `P2PSessionConnectFail err=4` (Timeout) and zero inbound. Cause: the **SDR relay backend was never
+> bootstrapped** — modern Steam runs legacy `ISteamNetworking` P2P on `SteamNetworkingSockets`/SDR, which needs
+> **`SteamNetworkingUtils()->InitRelayNetworkAccess()`** (the helper only called the unrelated old
+> `AllowP2PPacketRelay`). New startup line to check: **`[helper] InitRelayNetworkAccess() called (SDR relay
+> bootstrap)`**, and on the first P2P send **`[helper] RelayNetworkStatus … = 100 (Current/ready)`** — if that
+> reads `2 Attempting`/`1 Waiting` when the game sends, the relay hadn't finished initializing yet.
+
+> **Findings so far (2026-06-05):** the send side is correct (packets accepted, to the real lobby host), but
+> inbound is dead and Steam returns `P2PSessionConnectFail_t` (1203). The `err` byte is the open question.
+> **Gotcha:** the relay confirmation must be on **stderr** — `helper.log` captures stderr only, so startup
+> `printf`/stdout lines (e.g. `SteamAPI_Init ok`) do **not** appear there.
+
+See [08-roadmap.md → B6](08-roadmap.md#b6-join-a-friends-game--lobby--join-game).
+
 ## Log files (in `~/L4D2-launcher/`)
 
 | File | Contents |
