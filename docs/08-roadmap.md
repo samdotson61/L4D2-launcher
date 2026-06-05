@@ -675,6 +675,21 @@ already in place; verify timing end-to-end.
 > piece (this is exactly how the B5 server-browser fix was found). Optional quick parallel data point: re-run with
 > **`-condebug`** (`./play-l4d2.sh --diag-online -- -condebug`) to capture the Source engine's own netchannel reason
 > for "Session is no longer available" in `console.log`.
+>
+> **RESEARCH + FIX 2026-06-05 — proactively AcceptP2PSessionWithUser (Goldberg's workaround).** A deep-dive on
+> Proton's `lsteamclient`, Goldberg's `steam_networking.cpp`, and the official ISteamNetworking docs converged on
+> one root cause: **legacy P2P drops ALL inbound from a peer until the receiver calls `AcceptP2PSessionWithUser`
+> in response to `P2PSessionRequest_t` (1202).** In this bridge that 1202 never reaches us, so the session never
+> opens → 0 inbound → `k_EP2PSessionErrorTimeout`. Findings: (1) Proton's lsteamclient has a dedicated
+> *"Handle callbacks for ISteamNetworking interfaces"* commit — these callbacks are **not** plain passthrough;
+> (2) Goldberg **auto-accepts** the session and queues the callback, and even had to *delay* `P2PSessionRequest_t`
+> so consumers register first; (3) the official docs confirm: accept-or-drop, ~20 s → timeout. **Fix applied
+> (built clean):** the helper now **proactively `AcceptP2PSessionWithUser(peer)`** (deduped, never self) for every
+> peer it learns of — `SendP2PPacket` targets, `GetLobbyOwner` (the host), and `GetLobbyMemberByIndex` (joiners on
+> the host side, other clients on the joiner side) — instead of waiting for the 1202 we never get. Logs
+> `proactive AcceptP2PSessionWithUser(sid) -> N`. **Re-test #6 (LAN join) pending:** success = the inbound beacon
+> fires (`ReadP2PPacket > 0`) and the session connects; if still timing out, the accept-return values + the
+> `RelayNetworkStatus` line narrow it further.
 
 ### B7. Auth / VAC safety gate (clear before any secured server — applies throughout)
 **Cross-cutting, not a final step.** The bridge uses the host's **real** auth ticket and **real SteamID**

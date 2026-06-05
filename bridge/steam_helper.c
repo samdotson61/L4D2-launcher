@@ -332,6 +332,27 @@ static void     *(*p_NetUtils_Get)(void);                 // global accessor v00
 static void      (*p_NetUtils_InitRelayNetworkAccess)(void *self);
 static int       (*p_NetUtils_GetRelayNetworkStatus)(void *self, void *pDetails);
 static void      *g_steam_netutils = NULL;
+static uint64_t  g_my_steamid = 0;          // cached at init; never accept ourselves
+static uint64_t  g_accepted_peers[64];      // dedupe set for proactive accepts
+static int       g_accepted_count = 0;
+// Proactively open the inbound P2P channel with a known peer (a lobby owner/member
+// or a SendP2PPacket target). Research (Proton lsteamclient + Goldberg
+// steam_networking.cpp + the official ISteamNetworking docs) shows legacy P2P
+// DROPS all inbound from a peer until the receiver calls AcceptP2PSessionWithUser
+// in response to P2PSessionRequest_t(1202). In this bridge that 1202 never reaches
+// us, so the session never opens → 0 inbound → k_EP2PSessionErrorTimeout. Goldberg
+// works around the identical problem by auto-accepting; we do the same, deduped so
+// real Steam is called once per peer.
+static void maybe_accept_peer(uint64_t sid) {
+    if (!sid || sid == g_my_steamid) return;
+    if (!g_steam_networking || !p_Net_AcceptP2PSessionWithUser) return;
+    for (int i = 0; i < g_accepted_count; i++) if (g_accepted_peers[i] == sid) return;
+    if (g_accepted_count < (int)(sizeof g_accepted_peers / sizeof g_accepted_peers[0]))
+        g_accepted_peers[g_accepted_count++] = sid;
+    int rv = p_Net_AcceptP2PSessionWithUser(g_steam_networking, sid) ? 1 : 0;
+    hlog("[helper] proactive AcceptP2PSessionWithUser(%llu) -> %d\n",
+         (unsigned long long)sid, rv);
+}
 static const char *(*p_Friends_GetPersonaName)(void *self);
 static const char *(*p_Friends_GetFriendPersonaName)(void *self, uint64_t steamID);
 static int         (*p_Friends_RequestUserInformation)(void *self, uint64_t steamID, int nameOnly);
@@ -700,8 +721,8 @@ static int load_steam(void) {
            hUser, g_steam_user, g_steam_apps, g_steam_utils, g_steam_friends, g_steam_matchmaking);
 
     if (p_User_GetSteamID && g_steam_user) {
-        uint64_t sid = p_User_GetSteamID(g_steam_user);
-        printf("[helper] signed in as SteamID64 %llu\n", (unsigned long long)sid);
+        g_my_steamid = p_User_GetSteamID(g_steam_user);
+        printf("[helper] signed in as SteamID64 %llu\n", (unsigned long long)g_my_steamid);
     }
 
     // Initialize manual callback dispatch so we can drain callbacks for the
@@ -1107,6 +1128,9 @@ static int handle_one(int fd) {
                  avail==1 ? "Waiting" : avail<0 ? "Failed/CannotTry" : "NeverTried");
             s_relay_logged = 1;
         }
+        // Open the inbound channel with this peer so their replies aren't dropped
+        // (we never receive the P2PSessionRequest_t that would trigger this).
+        maybe_accept_peer(sid);
         int ok = p_Net_SendP2PPacket(g_steam_networking, sid, pubData, cb,
                                      (int)eP2PSend, (int)channel) ? 1 : 0;
         // Join-hang diag: is real Steam ACCEPTING our sends, and to whom?
@@ -1402,7 +1426,9 @@ static int handle_one(int fd) {
         if (alen < 12) return send_err(fd, 1);
         uint64_t lobby; uint32_t idx;
         memcpy(&lobby, args, 8); memcpy(&idx, args + 8, 4);
-        return send_u64(fd, p_MM_GetLobbyMemberByIndex(g_steam_matchmaking, lobby, (int)idx));
+        uint64_t member = p_MM_GetLobbyMemberByIndex(g_steam_matchmaking, lobby, (int)idx);
+        maybe_accept_peer(member);  // host accepts joiners; clients accept each other
+        return send_u64(fd, member);
     }
 
     case OP_MM_GETLOBBYDATA: {
@@ -1477,6 +1503,7 @@ static int handle_one(int fd) {
                  (unsigned long long)lobby, (unsigned long long)owner);
             s_last_owner = owner;
         }
+        maybe_accept_peer(owner);   // open inbound channel with the host
         return send_u64(fd, owner);
     }
 
