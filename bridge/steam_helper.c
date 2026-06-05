@@ -27,6 +27,7 @@
 #include <limits.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -233,31 +234,89 @@ static int   (*p_MMS_IsRefreshing)(void *self, void *hRequest);
 static int   (*p_MMS_GetServerCount)(void *self, void *hRequest);
 static void  (*p_MMS_RefreshServer)(void *self, void *hRequest, int iServer);
 
-// Dummy ISteamMatchmakingServerListResponse — real Steam calls into this
-// when servers respond.  We don't relay events to the bridge (game polls
-// GetServerCount/GetServerDetails directly), so the methods are no-ops.
-// Vtable order must match SDK 1.53a:
+// MatchMakingKeyValuePair_t (SDK matchmakingtypes.h) — the server-list match
+// filters the game passes to RequestInternetServerList.  Plain char, so the
+// layout is identical on Windows and macOS (no pack(4)/pack(8) split).  B5.1
+// deserializes the game's filters into a native array of these + a pointer
+// array (the SDK takes MatchMakingKeyValuePair_t** = an array of pointers).
+typedef struct { char m_szKey[256]; char m_szValue[256]; } MatchMakingKeyValuePair_t;
+#define MAX_MMS_FILTERS 16
+
+// ── ISteamMatchmakingServerListResponse → bridge forwarding (B5) ─────────────
+// Real Steam (the Mac client) invokes this response object's vtable as each
+// server in a Request*ServerList replies — possibly from its own server-query
+// thread.  L4D2's engine WAITS on these callbacks (it never polls
+// GetServerCount/GetServerDetails), so the old no-op handlers left the server
+// browser permanently empty.  We can't reach into the 32-bit Wine bridge from
+// here, so we QUEUE each event; OP_DRAIN_CALLBACKS ships them across as
+// 0xFFFFFFFD envelopes the bridge re-dispatches into the game's own vtable.
+// See B5 in docs/08-roadmap.md.
+//
+// Mutex-guarded: Steam may fire ServerResponded from a non-main thread while
+// the drain (main thread) is reading the queue.
+typedef struct { uint64_t hReq; int32_t iServer; uint32_t type; } mms_resp_ev_t;
+#define MMS_RESP_QUEUE_CAP 4096   // internet lists can be large; the ring
+                                  // spreads them across drains and drops only
+                                  // under a sustained flood (logged, not silent)
+static mms_resp_ev_t g_mms_resp_queue[MMS_RESP_QUEUE_CAP];
+static uint32_t g_mms_resp_head = 0;   // next to dequeue
+static uint32_t g_mms_resp_tail = 0;   // next to enqueue
+static uint64_t g_mms_resp_dropped = 0;
+static pthread_mutex_t g_mms_resp_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void mms_resp_enqueue(uint64_t hReq, int32_t iServer, uint32_t type) {
+    pthread_mutex_lock(&g_mms_resp_lock);
+    uint32_t next = (g_mms_resp_tail + 1) % MMS_RESP_QUEUE_CAP;
+    if (next == g_mms_resp_head) {
+        g_mms_resp_dropped++;              // ring full — drop newest
+    } else {
+        g_mms_resp_queue[g_mms_resp_tail].hReq    = hReq;
+        g_mms_resp_queue[g_mms_resp_tail].iServer = iServer;
+        g_mms_resp_queue[g_mms_resp_tail].type    = type;
+        g_mms_resp_tail = next;
+    }
+    pthread_mutex_unlock(&g_mms_resp_lock);
+}
+
+// Pop one event FIFO; returns 1 if *out was filled, 0 if the queue is empty.
+static int mms_resp_dequeue(mms_resp_ev_t *out) {
+    int got = 0;
+    pthread_mutex_lock(&g_mms_resp_lock);
+    if (g_mms_resp_head != g_mms_resp_tail) {
+        *out = g_mms_resp_queue[g_mms_resp_head];
+        g_mms_resp_head = (g_mms_resp_head + 1) % MMS_RESP_QUEUE_CAP;
+        got = 1;
+    }
+    pthread_mutex_unlock(&g_mms_resp_lock);
+    return got;
+}
+
+// The response object real Steam calls.  Vtable order matches SDK 1.53a:
 //   vt[0] ServerResponded(self, hReq, iServer)
 //   vt[1] ServerFailedToRespond(self, hReq, iServer)
 //   vt[2] RefreshComplete(self, hReq, eMatchMakingServerResponse)
-static void noop_ServerResponded(void *self, void *hReq, int iServer) {
-    (void)self; (void)hReq;
-    hlog("[helper] noop_ServerResponded: iServer=%d\n", iServer);
+// The queued `type` (0/1/2) is exactly the vtable slot the bridge re-invokes.
+static void srv_ServerResponded(void *self, void *hReq, int iServer) {
+    (void)self;
+    mms_resp_enqueue((uint64_t)(uintptr_t)hReq, iServer, 0);
+    hlog("[helper] ServerResponded: hReq=%p iServer=%d (queued)\n", hReq, iServer);
 }
-static void noop_ServerFailedToRespond(void *self, void *hReq, int iServer) {
-    (void)self; (void)hReq; (void)iServer;
+static void srv_ServerFailedToRespond(void *self, void *hReq, int iServer) {
+    (void)self;
+    mms_resp_enqueue((uint64_t)(uintptr_t)hReq, iServer, 1);
 }
-static void noop_RefreshComplete(void *self, void *hReq, int response) {
-    (void)self; (void)hReq;
-    hlog("[helper] noop_RefreshComplete: response=%d\n", response);
+static void srv_RefreshComplete(void *self, void *hReq, int response) {
+    (void)self;
+    mms_resp_enqueue((uint64_t)(uintptr_t)hReq, response, 2);
+    hlog("[helper] RefreshComplete: hReq=%p response=%d (queued)\n", hReq, response);
 }
-static void *g_noop_serverlist_response_vtable[] = {
-    (void*)noop_ServerResponded,
-    (void*)noop_ServerFailedToRespond,
-    (void*)noop_RefreshComplete,
+static void *g_serverlist_response_vtable[] = {
+    (void*)srv_ServerResponded,
+    (void*)srv_ServerFailedToRespond,
+    (void*)srv_RefreshComplete,
 };
-static struct { void **vtable; } g_noop_serverlist_response = {
-    .vtable = (void**)&g_noop_serverlist_response_vtable
+static struct { void **vtable; } g_serverlist_response = {
+    .vtable = (void**)&g_serverlist_response_vtable
 };
 static int       (*p_Net_SendP2PPacket)(void *self, uint64_t sid, const void *pubData, uint32_t cubData, int eP2PSend, int channel);
 static int       (*p_Net_IsP2PPacketAvailable)(void *self, uint32_t *pcubMsgSize, int channel);
@@ -725,13 +784,33 @@ static uint32_t repack_pack4_to_pack8(uint32_t id, const uint8_t *src,
     return srclen;
 }
 
+// gameserveritem_t is NOT a callback struct (no k_iCallback), so it isn't in
+// the per-id table above — but it has the same pack(4)/pack(8) split.  Measured
+// from bridge/sdk/matchmakingtypes.h (SDK 1.53a), confirmed by compiling the
+// header:
+//   macOS  pack(4): sizeof 372, CSteamID m_steamID @ 364
+//   Windows pack(8): sizeof 376, CSteamID m_steamID @ 368  (a 4-byte pad is
+//                    inserted after m_szGameTags[128] so the 8-byte SteamID
+//                    becomes 8-aligned)
+// The first 364 bytes (m_NetAdr … end of m_szGameTags) are byte-identical.
+// `dst` must hold >= 376 bytes; we read 372 from src (the real macOS struct).
+// Without this the game misreads the trailing m_steamID — the value it uses to
+// connect — by 4 bytes.  See B5 in docs/08-roadmap.md.
+static void repack_gameserveritem_pack4_to_pack8(const uint8_t *src, uint8_t *dst) {
+    memcpy(dst,       src,       364);   // m_NetAdr … end of m_szGameTags[128]
+    memset(dst + 364, 0,         4);     // pad so m_steamID lands 8-aligned
+    memcpy(dst + 368, src + 364, 8);     // CSteamID m_steamID
+}
+
 // ─── Per-connection request handler ──────────────────────────────────────────
 static int handle_one(int fd) {
     uint32_t hdr[2];
     if (read_exact(fd, hdr, sizeof hdr) < 0) return -1;
     uint32_t op  = hdr[0];
     uint32_t alen = hdr[1];
-    uint8_t  args[256] = {0};
+    // 4 KB (was 256) so OP_MMS_REQUESTINTERNETSERVERLIST can carry the game's
+    // serialized match filters (B5.1).  Every other op's arg is far smaller.
+    uint8_t  args[4096] = {0};
     if (alen > sizeof args) return -1;
     if (alen && read_exact(fd, args, alen) < 0) return -1;
     hlog("[helper] op=0x%04x alen=%u\n", op, alen);
@@ -1047,45 +1126,66 @@ static int handle_one(int fd) {
 #define MMS_REQUIRE(p) do { if (!g_steam_mm_servers || !(p)) return send_u64(fd, 0); } while (0)
     case OP_MMS_REQUESTINTERNETSERVERLIST: {
         MMS_REQUIRE(p_MMS_RequestInternetServerList);
-        // arg: u32 appid + serialized filters (key\0val\0)* — for now we
-        // forward with no filters (the game's RequestLobbyList filters were
-        // applied at the lobby layer; server browser filters are separate
-        // and L4D2 typically doesn't use them).
+        // arg: u32 appid + u32 nFilters + nFilters×(key\0 val\0).  We rebuild the
+        // game's match filters (gamedir/gametype/…) into a native pair array +
+        // pointer array and forward them so the list comes back filtered (B5.1).
         if (alen < 4) return send_u64(fd, 0);
         uint32_t appid; memcpy(&appid, args, 4);
-        void *h = p_MMS_RequestInternetServerList(g_steam_mm_servers, appid, NULL, 0, &g_noop_serverlist_response);
-        hlog("[helper] MMS_RequestInternetServerList(app=%u) -> %p\n", appid, h);
+        MatchMakingKeyValuePair_t pairs[MAX_MMS_FILTERS];
+        MatchMakingKeyValuePair_t *ptrs[MAX_MMS_FILTERS];
+        uint32_t nFilters = 0, parsed = 0, off = 4;
+        if (alen >= 8) { memcpy(&nFilters, args + 4, 4); off = 8; }
+        for (uint32_t i = 0; i < nFilters && parsed < MAX_MMS_FILTERS && off < alen; i++) {
+            const char *key = (const char*)(args + off);
+            uint32_t kl = 0;
+            while (off + kl < alen && args[off + kl]) kl++;
+            if (off + kl >= alen) break;          // unterminated → malformed
+            off += kl + 1;
+            const char *val = (const char*)(args + off);
+            uint32_t vl = 0;
+            while (off + vl < alen && args[off + vl]) vl++;
+            if (off + vl >= alen) break;
+            off += vl + 1;
+            snprintf(pairs[parsed].m_szKey,   sizeof pairs[parsed].m_szKey,   "%s", key);
+            snprintf(pairs[parsed].m_szValue, sizeof pairs[parsed].m_szValue, "%s", val);
+            ptrs[parsed] = &pairs[parsed];
+            hlog("[helper] MMS filter[%u]: %s=%s\n", parsed, pairs[parsed].m_szKey, pairs[parsed].m_szValue);
+            parsed++;
+        }
+        void **filterArg = parsed ? (void**)ptrs : NULL;
+        void *h = p_MMS_RequestInternetServerList(g_steam_mm_servers, appid, filterArg, parsed, &g_serverlist_response);
+        hlog("[helper] MMS_RequestInternetServerList(app=%u, nFilters=%u) -> %p\n", appid, parsed, h);
         return send_u64(fd, (uint64_t)(uintptr_t)h);
     }
     case OP_MMS_REQUESTLANSERVERLIST: {
         MMS_REQUIRE(p_MMS_RequestLANServerList);
         if (alen < 4) return send_u64(fd, 0);
         uint32_t appid; memcpy(&appid, args, 4);
-        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestLANServerList(g_steam_mm_servers, appid, &g_noop_serverlist_response));
+        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestLANServerList(g_steam_mm_servers, appid, &g_serverlist_response));
     }
     case OP_MMS_REQUESTFRIENDSSERVERLIST: {
         MMS_REQUIRE(p_MMS_RequestFriendsServerList);
         if (alen < 4) return send_u64(fd, 0);
         uint32_t appid; memcpy(&appid, args, 4);
-        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestFriendsServerList(g_steam_mm_servers, appid, NULL, 0, &g_noop_serverlist_response));
+        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestFriendsServerList(g_steam_mm_servers, appid, NULL, 0, &g_serverlist_response));
     }
     case OP_MMS_REQUESTFAVORITESSERVERLIST: {
         MMS_REQUIRE(p_MMS_RequestFavoritesServerList);
         if (alen < 4) return send_u64(fd, 0);
         uint32_t appid; memcpy(&appid, args, 4);
-        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestFavoritesServerList(g_steam_mm_servers, appid, NULL, 0, &g_noop_serverlist_response));
+        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestFavoritesServerList(g_steam_mm_servers, appid, NULL, 0, &g_serverlist_response));
     }
     case OP_MMS_REQUESTHISTORYSERVERLIST: {
         MMS_REQUIRE(p_MMS_RequestHistoryServerList);
         if (alen < 4) return send_u64(fd, 0);
         uint32_t appid; memcpy(&appid, args, 4);
-        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestHistoryServerList(g_steam_mm_servers, appid, NULL, 0, &g_noop_serverlist_response));
+        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestHistoryServerList(g_steam_mm_servers, appid, NULL, 0, &g_serverlist_response));
     }
     case OP_MMS_REQUESTSPECTATORSERVERLIST: {
         MMS_REQUIRE(p_MMS_RequestSpectatorServerList);
         if (alen < 4) return send_u64(fd, 0);
         uint32_t appid; memcpy(&appid, args, 4);
-        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestSpectatorServerList(g_steam_mm_servers, appid, NULL, 0, &g_noop_serverlist_response));
+        return send_u64(fd, (uint64_t)(uintptr_t)p_MMS_RequestSpectatorServerList(g_steam_mm_servers, appid, NULL, 0, &g_serverlist_response));
     }
     case OP_MMS_RELEASEREQUEST: {
         if (!g_steam_mm_servers || !p_MMS_ReleaseRequest) return send_resp(fd, 0, NULL, 0);
@@ -1101,8 +1201,13 @@ static int handle_one(int fd) {
         memcpy(&h, args, 8); memcpy(&iServer, args + 8, 4);
         void *p = p_MMS_GetServerDetails(g_steam_mm_servers, (void*)(uintptr_t)h, iServer);
         if (!p) return send_err(fd, 1);
-        // Forward 400 bytes of gameserveritem_t (struct size ~376; round up).
-        return send_resp(fd, 0, p, 400);
+        // The macOS struct is pack(4) (372 B); the Windows game expects pack(8)
+        // (376 B).  Convert before shipping, in a zero-padded 400-byte frame so
+        // the bridge's fixed 400-byte g_mms_server_details_buf still matches.
+        uint8_t out[400];
+        memset(out, 0, sizeof out);
+        repack_gameserveritem_pack4_to_pack8((const uint8_t*)p, out);
+        return send_resp(fd, 0, out, sizeof out);
     }
     case OP_MMS_CANCELQUERY: {
         if (!g_steam_mm_servers || !p_MMS_CancelQuery) return send_resp(fd, 0, NULL, 0);
@@ -1438,6 +1543,12 @@ static int handle_one(int fd) {
                 if (!p_ManualDispatch_GetNextCallback(g_h_steam_pipe, &msg)) break;
                 uint32_t id   = (uint32_t)msg.m_iCallback;
                 uint32_t dlen = (uint32_t)msg.m_cubParam;
+                // B1 diagnostic: log every callback real Steam emits via
+                // ManualDispatch — confirms whether/when the online-mode
+                // signals (101 SteamServersConnected, 103 Disconnected,
+                // 304 PersonaStateChange) actually arrive from the Mac
+                // client.  Whether 101 is ever emitted is the core B1 unknown.
+                hlog("[helper] real cb id=%u dlen=%u\n", id, dlen);
 
                 if (id == 703 && p_ManualDispatch_GetAPICallResult && dlen >= 16 && msg.m_pubParam) {
                     // SteamAPICallCompleted_t — fetch the real result.
@@ -1517,6 +1628,32 @@ static int handle_one(int fd) {
                 n_cb++;
                 p_ManualDispatch_FreeLastCallback(g_h_steam_pipe);
             }
+        }
+        // Ship queued server-browser responses (B5).  Real Steam fired
+        // ServerResponded/ServerFailedToRespond/RefreshComplete into
+        // g_serverlist_response (possibly off-thread); forward each as a
+        // 0xFFFFFFFD envelope { hReq:u64, iServer:i32, type:u32 } the bridge
+        // re-dispatches into the game's response vtable.  Cap per drain so a
+        // large internet list spreads across drains (the browser populates
+        // incrementally) instead of bloating one drain; the buffer-space check
+        // is evaluated before dequeue so a full buffer never drops an event.
+        {
+            mms_resp_ev_t ev;
+            uint32_t shipped = 0;
+            while (shipped < 256 && off + 8 + 16 <= sizeof buf && mms_resp_dequeue(&ev)) {
+                uint32_t marker = 0xFFFFFFFDu;
+                uint32_t envelopeLen = 16;   // hReq(8) + iServer(4) + type(4)
+                memcpy(buf + off, &marker,      4); off += 4;
+                memcpy(buf + off, &envelopeLen, 4); off += 4;
+                memcpy(buf + off, &ev.hReq,     8); off += 8;
+                memcpy(buf + off, &ev.iServer,  4); off += 4;
+                memcpy(buf + off, &ev.type,     4); off += 4;
+                n_cb++;
+                shipped++;
+            }
+            if (shipped)
+                hlog("[helper] shipped %u server-response envelope(s)%s\n", shipped,
+                     g_mms_resp_dropped ? " (some dropped — queue flooded)" : "");
         }
         // Inject any queued synthetic callbacks.  Data is already in
         // Windows pack(8) layout, so it skips the per-id repack table.

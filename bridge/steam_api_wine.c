@@ -288,7 +288,7 @@ static const char* TC stub_str_7(void *s, int a, int b, int c, int d, int e, int
 // ── Real RPC-backed implementations (forwarded to native Mac Steam) ─────────
 // Names match what gen_vtables.py's REAL_IMPLS map references.
 static int TC user_GetHSteamUser(struct ISteamFake* s)  { (void)s; return (int)rpc_u32(OP_GET_HSTEAMUSER); }
-static int TC user_BLoggedOn(struct ISteamFake* s)      { (void)s; return (int)rpc_u32(OP_USER_BLOGGEDON); }
+static int TC user_BLoggedOn(struct ISteamFake* s)      { (void)s; int r = (int)rpc_u32(OP_USER_BLOGGEDON); static unsigned n = 0; if (n < 8 || (n & 0xFF) == 0) dbg("[bridge] BLoggedOn() -> %d (poll #%u)\n", r, n); n++; return r; }
 // CSteamID is returned by value: MSVC x86 thiscall passes a hidden pointer
 // to the return buffer as the first stack arg, and expects EAX = hidden_ptr
 // + the callee to pop 4 bytes via `ret 4`. GCC produces that for a struct
@@ -375,7 +375,12 @@ static u64 TC utils_CheckFileSignature(struct ISteamFake* s, const char* szFileN
 // EUniverse enum value — 1 = k_EUniversePublic.  Game checks this to confirm
 // Steam is connected to the public universe before allowing matchmaking.
 static int TC utils_GetConnectedUniverse(struct ISteamFake* s) {
-    (void)s; return (int)rpc_u32(OP_UTILS_GETCONNECTEDUNIVERSE);
+    (void)s; int r = (int)rpc_u32(OP_UTILS_GETCONNECTEDUNIVERSE);
+    // B1 diagnostic: engine expects k_EUniversePublic (1) before matchmaking.
+    static unsigned n = 0;
+    if (n < 8 || (n & 0xFF) == 0) dbg("[bridge] GetConnectedUniverse() -> %d (poll #%u)\n", r, n);
+    n++;
+    return r;
 }
 static u32 TC utils_GetServerRealTime(struct ISteamFake* s) {
     (void)s; return rpc_u32(OP_UTILS_GETSERVERREALTIME);
@@ -784,6 +789,10 @@ static void mm_keep_unused(void) { g_mm_lobby_key_buf[0] = 0; (void)mm_keep_unus
 // by a 32-bit fake handle (slot+1; 0 reserved as invalid).
 #define MAX_MMS_HANDLES 16
 static u64 g_mms_handle_table[MAX_MMS_HANDLES];
+// Game's ISteamMatchmakingServerListResponse* for each request, parallel to
+// g_mms_handle_table (indexed by fake-1).  B5 re-dispatches the server-browser
+// callbacks (ServerResponded/…) into this object's vtable.
+static void *g_mms_response_table[MAX_MMS_HANDLES];
 static int g_mms_n_handles = 0;
 
 static u32 mms_handle_alloc(u64 real_handle) {
@@ -810,9 +819,19 @@ static u64 mms_handle_lookup(u32 fake) {
     return g_mms_handle_table[fake - 1];
 }
 
+// Reverse of mms_handle_alloc: map a real Mac handle back to its fake u32.
+// B5 server-browser callbacks arrive keyed by the real handle.  0 = not found.
+static u32 mms_handle_find(u64 real_handle) {
+    if (!real_handle) return 0;
+    for (int i = 0; i < g_mms_n_handles; i++)
+        if (g_mms_handle_table[i] == real_handle) return (u32)(i + 1);
+    return 0;
+}
+
 static void mms_handle_free(u32 fake) {
     if (!fake || fake > (u32)g_mms_n_handles) return;
     g_mms_handle_table[fake - 1] = 0;
+    g_mms_response_table[fake - 1] = 0;
 }
 
 // gameserveritem_t buffer — SDK returns a pointer into Steam-owned memory
@@ -823,50 +842,106 @@ static unsigned char g_mms_server_details_buf[400];
 
 // Generic shape for the Request*ServerList family: arg = u32 appid →
 // u64 real handle. We allocate a fake u32 handle for the game.
-static u32 mms_request_impl(u32 op, u32 appid) {
+// Core: run the request RPC with an arbitrary arg blob, alloc a fake handle,
+// and remember the game's response object for B5 callback re-dispatch.
+static u32 mms_request_impl_arg(u32 op, const void *arg, u32 alen, u32 appid, void *pResponse) {
     g_mm_engaged = 1;  // also opens matchmaking-callback gate
-    u64 real = rpc_u64_(op, &appid, sizeof appid);
+    u64 real = rpc_u64_(op, arg, alen);
     u32 fake = mms_handle_alloc(real);
-    dbg("[bridge] mms_request op=0x%x appid=%u real=%08lx:%08lx fake=%u\n",
+    if (fake) g_mms_response_table[fake - 1] = pResponse;  // for B5 callback re-dispatch
+    dbg("[bridge] mms_request op=0x%x appid=%u real=%08lx:%08lx fake=%u resp=%p\n",
         op, appid,
-        (unsigned long)(real >> 32), (unsigned long)(real & 0xFFFFFFFF), fake);
+        (unsigned long)(real >> 32), (unsigned long)(real & 0xFFFFFFFF), fake, pResponse);
     return fake;
+}
+// appid-only request (LAN/Friends/Favorites/History/Spectator — no filters).
+static u32 mms_request_impl(u32 op, u32 appid, void *pResponse) {
+    return mms_request_impl_arg(op, &appid, sizeof appid, appid, pResponse);
 }
 
 static void* TC mms_RequestInternetServerList(struct ISteamFake* s, u32 iApp,
                                               void* ppchFilters, u32 nFilters,
                                               void* pResponse) {
-    (void)s; (void)ppchFilters; (void)nFilters; (void)pResponse;
-    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTINTERNETSERVERLIST, iApp);
+    (void)s;
+    // B5.1: forward the game's match filters (game-mode, gamedir, map, …) so the
+    // server list comes back filtered.  ppchFilters is MatchMakingKeyValuePair_t**
+    // — an ARRAY OF nFilters POINTERS, each → { char m_szKey[256]; char
+    // m_szValue[256]; } (per the SDK's STEAM_ARRAY_COUNT annotation and
+    // Goldberg/Proton).  Serialize: u32 appid, u32 nFilters, nFilters×(key\0 val\0).
+    // Filters are plain char, so no pack(4)/pack(8) concern.
+    u8 arg[4096];
+    u32 off = 0;
+    my_memcpy(arg + off, &iApp, 4); off += 4;
+    u32 nfoff = off; off += 4;            // nFilters slot — written after counting
+    u32 written = 0;
+    if (ppchFilters && nFilters) {
+        u32 n = nFilters < 64 ? nFilters : 64;   // runaway guard
+        // ppchFilters is MatchMakingKeyValuePair_t**.  L4D2/Source passes
+        // &pFilters where pFilters → a CONTIGUOUS array of nFilters structs, so
+        // we deref ONCE to get the array base and index it by 512.  (The earlier
+        // array-of-pointers read was wrong — helper.log showed filter[0] correct
+        // but [1..] garbage: element 0 worked only because *ppchFilters IS the
+        // base.)  Each struct is { char m_szKey[256]; char m_szValue[256]; }.
+        const char *base = IsBadReadPtr(ppchFilters, sizeof(void*))
+                               ? NULL : *(const char* const*)ppchFilters;
+        for (u32 i = 0; base && i < n; i++) {
+            const char *key = base + (size_t)i * 512;   // m_szKey[256]
+            if (IsBadReadPtr((void*)key, 512)) {        // ran off the mapped array
+                dbg("[bridge] RequestInternetServerList: filter[%u] (base+%u) unreadable — stop\n",
+                    i, (unsigned)(i * 512));
+                break;
+            }
+            const char *val = key + 256;                // m_szValue[256]
+            u32 kl = 0; while (kl < 255 && key[kl]) kl++;
+            // A real filter key is non-empty printable ASCII ("gamedir",
+            // "gametype", "map", …).  Skip anything else so a misread never ships
+            // garbage filters to Steam (which silently breaks the query — that's
+            // what regressed joining: garbage [1..5] keys went out over the wire).
+            int ok = (kl > 0);
+            for (u32 j = 0; j < kl && ok; j++)
+                if ((unsigned char)key[j] < 0x20 || (unsigned char)key[j] > 0x7e) ok = 0;
+            if (!ok) { dbg("[bridge] RequestInternetServerList: filter[%u] skipped (non-printable key)\n", i); continue; }
+            u32 vl = 0; while (vl < 255 && val[vl]) vl++;
+            if (off + kl + 1 + vl + 1 > sizeof arg) break;   // out of room
+            my_memcpy(arg + off, key, kl); off += kl; arg[off++] = 0;
+            my_memcpy(arg + off, val, vl); off += vl; arg[off++] = 0;
+            written++;
+            dbg("[bridge] RequestInternetServerList filter[%u]: %s=%s\n", i, key, val);
+        }
+    }
+    my_memcpy(arg + nfoff, &written, 4);
+    if (nFilters != written)
+        dbg("[bridge] RequestInternetServerList: forwarded %u of %u filter(s)\n", written, nFilters);
+    return (void*)(uintptr_t)mms_request_impl_arg(OP_MMS_REQUESTINTERNETSERVERLIST, arg, off, iApp, pResponse);
 }
 static void* TC mms_RequestLANServerList(struct ISteamFake* s, u32 iApp,
                                          void* pResponse) {
-    (void)s; (void)pResponse;
-    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTLANSERVERLIST, iApp);
+    (void)s;
+    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTLANSERVERLIST, iApp, pResponse);
 }
 static void* TC mms_RequestFriendsServerList(struct ISteamFake* s, u32 iApp,
                                              void* ppchFilters, u32 nFilters,
                                              void* pResponse) {
-    (void)s; (void)ppchFilters; (void)nFilters; (void)pResponse;
-    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTFRIENDSSERVERLIST, iApp);
+    (void)s; (void)ppchFilters; (void)nFilters;
+    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTFRIENDSSERVERLIST, iApp, pResponse);
 }
 static void* TC mms_RequestFavoritesServerList(struct ISteamFake* s, u32 iApp,
                                                void* ppchFilters, u32 nFilters,
                                                void* pResponse) {
-    (void)s; (void)ppchFilters; (void)nFilters; (void)pResponse;
-    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTFAVORITESSERVERLIST, iApp);
+    (void)s; (void)ppchFilters; (void)nFilters;
+    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTFAVORITESSERVERLIST, iApp, pResponse);
 }
 static void* TC mms_RequestHistoryServerList(struct ISteamFake* s, u32 iApp,
                                              void* ppchFilters, u32 nFilters,
                                              void* pResponse) {
-    (void)s; (void)ppchFilters; (void)nFilters; (void)pResponse;
-    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTHISTORYSERVERLIST, iApp);
+    (void)s; (void)ppchFilters; (void)nFilters;
+    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTHISTORYSERVERLIST, iApp, pResponse);
 }
 static void* TC mms_RequestSpectatorServerList(struct ISteamFake* s, u32 iApp,
                                                void* ppchFilters, u32 nFilters,
                                                void* pResponse) {
-    (void)s; (void)ppchFilters; (void)nFilters; (void)pResponse;
-    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTSPECTATORSERVERLIST, iApp);
+    (void)s; (void)ppchFilters; (void)nFilters;
+    return (void*)(uintptr_t)mms_request_impl(OP_MMS_REQUESTSPECTATORSERVERLIST, iApp, pResponse);
 }
 
 static void TC mms_ReleaseRequest(struct ISteamFake* s, void* hRequest) {
@@ -1372,6 +1447,7 @@ static void thiscall_run1(void *self, void *pvParam, int bIOFailure, u64 hAPICal
 // Forward decl — defined below near cb_fire.
 static void thiscall_run0(void *self, void *pvParam, void *fn);
 static void thiscall_run1(void *self, void *pvParam, int bIOFailure, u64 hAPICall, void *fn);
+static void thiscall_run2(void *self, void *a, int b, void *fn);
 
 // Detect a thiscall function's stack-arg cleanup size by scanning for its
 // terminating `ret $N` (opcode `c2 NN 00`) or `ret` (`c3`) within the
@@ -1483,6 +1559,65 @@ static void thiscall_run0(void *self, void *pvParam, void *fn) {
     );
 }
 
+// thiscall_run2(self, a, b, fn) — for a 2-arg __thiscall whose callee cleans
+// its own 8 bytes of args (`ret 8`).  Neither run0 (ret 4) nor run1 (ret 16)
+// fits.  Used by B5 to invoke ISteamMatchmakingServerListResponse vtable slots:
+//   ServerResponded(hReq, iServer) / ServerFailedToRespond(hReq, iServer) /
+//   RefreshComplete(hReq, response) — each (this + 2 stack args).
+// Same defensive callee-saved register save/restore as thiscall_run0.
+__attribute__((naked))
+static void thiscall_run2(void *self, void *a, int b, void *fn) {
+    (void)self; (void)a; (void)b; (void)fn;
+    __asm__(
+        "movl 4(%esp),  %ecx    \n\t"   // ecx = self (thiscall this)
+        "movl 16(%esp), %edx    \n\t"   // edx = fn target
+        "pushl %ebx             \n\t"
+        "pushl %esi             \n\t"
+        "pushl %edi             \n\t"
+        "pushl %ebp             \n\t"
+        // thiscall args pushed right-to-left (arg2 then arg1).  After the 4
+        // pushes b is at 28(%esp); after b's push the stack grows so a is at
+        // 28(%esp) again — hence the repeated offset (mirrors thiscall_run1).
+        "pushl 28(%esp)         \n\t"   // arg2: b (iServer / response)
+        "pushl 28(%esp)         \n\t"   // arg1: a (fake hRequest)
+        "calll *%edx            \n\t"   // __thiscall, cleans its 2 args via `ret 8`
+        "popl %ebp              \n\t"
+        "popl %edi              \n\t"
+        "popl %esi              \n\t"
+        "popl %ebx              \n\t"
+        "ret                    \n\t"
+    );
+}
+
+// B5: re-dispatch a server-browser callback that real Steam fired into the
+// helper's response object.  realHReq is the Mac-side request handle; map it
+// back to the fake handle the game holds, find the game's response object, and
+// invoke the matching vtable slot (type 0/1/2 = Responded/Failed/RefreshComplete).
+// The game's ServerResponded handler typically calls straight back into
+// mms_GetServerDetails(fakeHReq, iServer), so the handle we pass MUST be the
+// fake one it originally received.
+static void mms_dispatch_server_response(u64 realHReq, int iServer, u32 type) {
+    if (type > 2) return;
+    u32 fake = mms_handle_find(realHReq);
+    if (!fake) {
+        dbg("[bridge] mms_resp: no handle for real=%08lx:%08lx (type=%u) — dropped\n",
+            (unsigned long)(realHReq >> 32), (unsigned long)(realHReq & 0xFFFFFFFF), type);
+        return;
+    }
+    void *pResponse = g_mms_response_table[fake - 1];
+    if (!pResponse) { dbg("[bridge] mms_resp: fake=%u has no response obj\n", fake); return; }
+    void **vt = *(void***)pResponse;
+    if (!vt || !vt[type]) return;
+    // All three slots are 2-arg interface methods (ret 8) — the contract is
+    // fixed by the SDK ABI and confirmed by a Wine unit test plus 1600+ live
+    // dispatches (field test 2026-06-05).  We deliberately do NOT run
+    // detect_ret_clean here: its naive 64-byte scan false-positives on this
+    // function (reads a stray 0xc3 as `ret 0`), which would only cry wolf.
+    dbg("[bridge] mms_resp: fake=%u type=%u iServer=%d -> %p\n",
+        fake, type, iServer, vt[type]);
+    thiscall_run2(pResponse, (void*)(uintptr_t)fake, iServer, vt[type]);
+}
+
 // Fire a callback to ALL registered handlers matching iCallback.
 static int cb_fire(int iCallback, void *pvParam) {
     int fired = 0;
@@ -1511,7 +1646,7 @@ static int cb_fire(int iCallback, void *pvParam) {
     }
     // Always log id=143 (ValidateAuthTicketResponse_t) — STEAM-validation
     // rejected disconnects pin on this path; we need to see every call.
-    if (fired || iCallback == 143) {
+    if (fired || iCallback == 143 || iCallback == 101 || iCallback == 103) {
         dbg("[bridge] cb_fire id=%d -> %d delivered / %d candidate(s)\n",
             iCallback, fired, candidates);
     }
@@ -1562,7 +1697,11 @@ struct IPCountry_t {
 // state (LobbyEnter_t, UserStatsReceived_t, friend updates, etc.) so the
 // state machines that gated level load are now driven by truth, not by
 // our guesses.
-static unsigned char g_drain_buf[32768];
+// Matches the helper's 256 KB drain buffer.  rpc_call DISCARDS a response
+// larger than this buffer (it drains to /dev/null and returns 0), so an
+// undersized buffer would silently drop an entire drain — losing not just B5
+// server-browser events but any co-resident lobby callbacks in the same drain.
+static unsigned char g_drain_buf[262144];
 
 static void deliver_pending_callbacks(void) {
     g_runcb_tick++;
@@ -1644,6 +1783,20 @@ static void deliver_pending_callbacks(void) {
             // paths so whichever handler the game uses receives the data.
             cr_fire(hAsyncCall, data, (int)bFailed);
             cb_fire((int)realId, data);
+            off += dlen;
+            continue;
+        }
+
+        // Special envelope: 0xFFFFFFFD marks a server-browser response (B5).
+        // Payload: { hReq:u64 (real Mac handle), iServer:i32, type:u32 }.
+        // Re-dispatch into the game's ISteamMatchmakingServerListResponse.
+        if (id == 0xFFFFFFFDu) {
+            if (dlen < 16) { off += dlen; continue; }
+            u64 realHReq = 0; u32 iServer = 0, type = 0;
+            memcpy(&realHReq, g_drain_buf + off,      8);
+            memcpy(&iServer,  g_drain_buf + off + 8,  4);
+            memcpy(&type,     g_drain_buf + off + 12, 4);
+            mms_dispatch_server_response(realHReq, (int)iServer, type);
             off += dlen;
             continue;
         }

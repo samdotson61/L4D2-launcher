@@ -31,7 +31,7 @@ Current baseline: `git HEAD 9a5dedf` (*"working and playable my boy"*, committed
 | Max settings (4× MSAA + multicore + max textures) | **Default, not forced** — the launcher seeds the max baseline on first run; in-game Options → Video changes then persist across restarts (`--max-settings` re-applies max). *(policy revised 2026-06-04, C2)* |
 | **HDR / tonemapping + DX9 shading** | **Playable** — rendering fixed 2026-06-03 (was our own `+mat_hdr_level 1` pin; removed → engine default = full HDR, at DX9.5 `mat_dxlevel 100`); **playability fixed 2026-06-04** — the `0x010c` device-lost was an **attachment-less render pass** (a 16384×16384 pass with zero attachments hard-aborts the AGX GPU), now skipped in patched MoltenVK. User played levels 1→2 with no freeze/crash; 0 faults in 150 s runs. Only residual: an occasional stutter ([issue #5](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). ([issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)) |
 | Flashlight shadow | On (`r_flashlightdepthtexture 1`) — dynamic shadows render |
-| **Online / multiplayer** | **Not working** — bridge plumbing present, but the engine is never put into Steam "online mode" → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
+| **Online / multiplayer** | **Lobbies work; server-browser browse + join field-confirmed on non-VAC (B5, 2026-06-05)** — online mode + lobby create/join confirmed (2026-06-04); the dedicated-server browser now forwards `ServerResponded` to the engine (a live run re-dispatched 1600+ rows and a non-VAC join started a game) with the `gameserveritem_t` row repacked pack(4)→pack(8). Match filters now forwarded too (B5.1, re-test pending) so a campaign browse filters by mode; official/VAC servers are the B7 gate → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
 | **Portability (any Apple Silicon Mac)** | Goal — **all six per-machine items (D1–D6) are code-complete** (dylib path, dynamic resolution, Mac-Steam + GPU preflight, computed launcher dir; 2026-06-04). Only **validation** remains: a clean-Mac build + a non-M4 Apple Silicon test → [Phase 2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
 
 ## The stack
@@ -288,9 +288,13 @@ Full list with cause/workaround/status: [03 — Known issues](https://github.com
   confirmed **red herrings**.) The only residual is an occasional stutter (a perf nit). Details:
   [issue #1](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md) ·
   [issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md).
-- **Online multiplayer doesn't work yet.** The bridge proxies lobbies, P2P, the server browser, and auth to
-  real Mac Steam, but the engine is never put into Steam "online mode" (`SteamServersConnected_t` is
-  blacklisted because firing it currently hangs). This is **Phase 3**.
+- **Online multiplayer — lobbies work; dedicated-server browse + join field-confirmed on non-VAC servers (B5, 2026-06-05).** The
+  online plumbing works: the engine reaches Steam "online mode," and lobby create/join now succeed (`result=1` /
+  `resp=1`; the earlier rate-limit was transient). The dedicated-server browser's `ServerResponded` events —
+  previously dropped by the helper — are now queued and forwarded into the engine's response object (a live run
+  re-dispatched 1600+ rows and a non-VAC join started a game), with the `gameserveritem_t` row repacked
+  pack(4)→pack(8). The game's match filters are now forwarded too (B5.1, re-test pending) so a campaign browse
+  filters by mode; official/VAC servers remain the B7 gate. This is **Phase 3**.
 - **Player settings persist (policy revised 2026-06-04).** Max settings is the **first-run default**, not a
   per-launch override: the launcher *seeds* the max baseline into `video.txt`, then **never overwrites a value
   the player changed** in-game — resolution, MSAA, aniso, detail/texture levels (`gpu_level`/`gpu_mem_level`),

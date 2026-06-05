@@ -28,6 +28,49 @@ MVK_CONFIG_PERFORMANCE_TRACKING=1 MVK_CONFIG_PERFORMANCE_LOGGING_FRAME_COUNT=120
   ./diag-monitor.sh "perf run"
 ```
 
+## Online-mode (Phase 3 / B1) diagnostics
+
+Phase 3 (online multiplayer) hinges on what the engine waits on once it enters Steam "online mode." The
+Steam bridge has a trace for exactly that, enabled in one shot:
+
+```bash
+./play-l4d2.sh --diag-online        # plus the usual launch args
+```
+
+It sets `L4D2_BRIDGE_DEBUG=1` (Wine DLL → `/tmp/bridge.log`) and `L4D2_HELPER_DEBUG=1` (native helper →
+`helper.log`). In-game, reach the **main menu**, then exercise the online path under test (e.g. **Play →
+Versus/Campaign → Online**, or host a game). Quit normally and grep:
+
+| Log | Grep for |
+|---|---|
+| `helper.log` | `real cb id=101` — does real Mac Steam ever emit `SteamServersConnected_t`? · `op=0x…` — the exact RPC-op sequence the engine makes after the menu |
+| `/tmp/bridge.log` | `cb_register id=101` (engine registered its handler) vs `cb_fire id=101 -> N delivered / M candidate(s)` (`0 delivered` = dropped, fired before registration) · `BLoggedOn() -> …` / `GetConnectedUniverse() -> …` (expect `1`/`1`) · `drain: skipped … (blacklisted)` for 304/1101 |
+
+**Questions B1 answers:** (1) is 101 emitted at all; (2) delivered or dropped on a registration-timing
+race; (3) does `BLoggedOn`/universe report online; (4) what does the engine poll/loop on afterward (the
+`PersonaStateChange_t` id 304 friends-list walk — currently suppressed — is the prime suspect). Output: the
+post-101 dependency list B2–B3 must satisfy.
+
+> `SteamServersConnected_t` (101) is **not** blacklisted (un-blacklisted 2026-05-26); the live blacklist is
+> only 304 (`PersonaStateChange_t`) + 1101 (`UserStatsReceived_t`). See
+> [08-roadmap.md Phase 3](08-roadmap.md#phase-3--online-multiplayer-join-official-steam-games).
+
+## Server-browser (Phase 3 / B5) diagnostics
+
+Once a server query runs (Play → an internet/dedicated server list, or the in-game server browser), B5's
+forwarding path is traceable end to end under `--diag-online`:
+
+| Log | Grep for |
+|---|---|
+| `helper.log` | `MMS_RequestInternetServerList(app=… nFilters=N)` + `MMS filter[N]: key=val` — the match filters we forwarded to real Steam (B5.1) · `ServerResponded: hReq=… iServer=… (queued)` / `RefreshComplete: … (queued)` — real Steam is finding servers and we're queueing them · `shipped N server-response envelope(s)` — events handed to the drain (a trailing `(some dropped — queue flooded)` = the 4096-deep ring overflowed) |
+| `/tmp/bridge.log` | `RequestInternetServerList filter[i]: key=val` — the filters the game asked for (B5.1; keys are read from the contiguous `*ppchFilters` array and validated as printable ASCII, so they should all be clean like `gamedir=left4dead2` / `gametype=…`; a `filter[i] skipped (non-printable key)` line means the read overran the real filter count) · `mms_request op=0x700 … resp=0x…` — the game's response object was captured (not discarded) · `mms_resp: fake=F type=T iServer=N -> 0x…` — an event re-dispatched into the game's vtable (type 0/1/2 = Responded/Failed/RefreshComplete) · `mms_resp: no handle …` — a response for a released/unknown request |
+
+**Healthy pattern:** bridge `RequestInternetServerList filter[…]` + helper `MMS filter[…]` (filters match),
+then helper `ServerResponded … (queued)` + `shipped N …`, then bridge `mms_resp: … -> 0x…` (one per server) and
+the browser populates with **mode-matching** servers. If the helper queues but the bridge logs `mms_resp: no
+handle`, the request-handle mapping is off; if `shipped` stays 0 while the helper keeps queueing, the drain
+isn't reaching `OP_DRAIN_CALLBACKS`. See [08-roadmap.md B5](08-roadmap.md#b5-join-an-official-dedicated-server-via-the-server-browser).
+
 ## Log files (in `~/L4D2-launcher/`)
 
 | File | Contents |
@@ -36,7 +79,8 @@ MVK_CONFIG_PERFORMANCE_TRACKING=1 MVK_CONFIG_PERFORMANCE_LOGGING_FRAME_COUNT=120
 | `gpu-faults.log` | Kernel AGX/IOGPU fault lines — the *real* OS-level reason for a `0x010c` |
 | `left4dead2_d3d9.log` | DXVK D3D9 log: adapter ("Apple M4 Pro"), enabled extensions, **device feature list**, swapchain (written when `--diag` enables `DXVK_LOG_LEVEL=info`) |
 | `<game>/left4dead2/console.log` | Source engine console (written by `-condebug`): `HDR Enabled/Disabled`, `Unknown command …`, cvar query results, lightmap reloads |
-| `helper.log` | `steam_helper` RPC activity |
+| `helper.log` | `steam_helper` RPC activity; under `--diag-online` also the real-Steam callback trace (`real cb id=…`) |
+| `/tmp/bridge.log` | Wine-side Steam-DLL trace under `--diag-online` (`Z:\tmp\bridge.log` inside the prefix): `cb_register`/`cb_fire`, `BLoggedOn`/`GetConnectedUniverse`, callback drain |
 
 > The normal (non-`--diag`) launch path does **not** write `game-stderr.log`. Always use `--diag` when you need the fault log — otherwise the fault count reads 0 from a stale/empty file.
 

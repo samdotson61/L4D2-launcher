@@ -310,8 +310,30 @@ M1–M4+. Patched MoltenVK/DXVK rebuild from pinned tags + tracked `.patch` file
 
 # Phase 3 — Online multiplayer: join official Steam games
 
-> **Status: NOT STARTED — the current frontier and the highest-risk phase.** Phases 1 (shading) and 2
-> (portability) are complete; online multiplayer is the one remaining capability and the active work.
+> **Status: IN PROGRESS — lobbies WORK; dedicated-server browse + join FIELD-CONFIRMED 2026-06-05 on non-VAC
+> servers; match-filter forwarding (B5.1) IMPLEMENTED, re-test pending. Official servers are the VAC gate
+> (B7).** Phases 1 (shading) and 2 (portability) are complete. Progress via `--diag-online` captures:
+> - **B1–B4 (lobby path) — proven 2026-06-04.** Online mode is reached (`BLoggedOn()=1`,
+>   `GetConnectedUniverse()=1`), `RequestLobbyList` returns 50 real lobbies, and once the earlier rate-limit
+>   cleared (it was **transient** — from repeated testing), **`CreateLobby` returns `result=1` with a real
+>   lobby and lobby joins return `resp=1` (Success)**. Local/online server creation from the menu works.
+>   `SteamServersConnected_t` (101) was never even needed.
+> - **B5 (dedicated servers) — root cause found 2026-06-04; fix IMPLEMENTED + FIELD-CONFIRMED 2026-06-05.**
+>   The server browser was empty because the helper's `ISteamMatchmakingServerListResponse` was a **no-op**:
+>   real Steam finds servers (`helper.log`: `noop_ServerResponded iServer=0..22+`) but the events were dropped,
+>   and the L4D2 engine **waits on those callbacks** — it never calls `GetServerCount`/`GetServerDetails`. The
+>   fix now **forwards** `ServerResponded`/`ServerFailedToRespond`/`RefreshComplete` to the game's response
+>   object — the helper queues each (mutex-guarded; Steam fires them off-thread) → ships a `0xFFFFFFFD` drain
+>   envelope → the bridge re-dispatches into the game's vtable via a new 2-arg `__thiscall` trampoline
+>   (`thiscall_run2`) — **and converts `gameserveritem_t` pack(4)→pack(8)** in `GetServerDetails` (the second
+>   bug). **Field test 2026-06-05:** browser populated (1600+ rows re-dispatched, `op=0x0707 GetServerDetails`
+>   now called), and a non-VAC dedicated join started a game. Open: **filters are dropped** so the browser is
+>   unfiltered (B5.1), and **official = VAC** (B7). **Approach validated against Proton's `lsteamclient`
+>   (deep-research 2026-06-04)** — it does exactly
+>   this (`CALL_IFACE_VTABLE_0_SERVER_RESPONDED`). Both binaries build clean; `thiscall_run2` was verified
+>   under Wine (correct args + balanced stack), the `gameserveritem_t` offsets confirmed by compiling the SDK
+>   header (372/`m_steamID`@364 macOS → 376/@368 Windows), and the drain envelope verified by round-trip test.
+>   Remaining: a live field test (`connect <ip>` + browser populates with a friend / real servers). See B5.
 
 **Milestone:** first end-to-end proof = listen-server + friend-join; then join official servers via the
 browser/lobby. (Issues #6, #7.)
@@ -323,11 +345,20 @@ client: lobby browse/create/join, lobby data/members/owner/game-server, P2P send
 browser, auth tickets, and **synthetic host-side validation** (`ValidateAuthTicketResponse_t` +
 `GSClientApprove_t`).
 
-**The real blocker:** the bridge **blacklists** `SteamServersConnected_t` (id 101) because firing it flips
-the engine into "Steam online mode," after which the engine **blocks on follow-on state the bridge
-doesn't yet deliver** (permanent loading screen). Single-player survives *because* we suppress online
-mode. **Online MP requires online mode** — so Phase 3 is genuine R&D, not a config flip, and the
-highest-risk phase.
+**The real blocker (refined 2026-06-04 by a code read):** entering "Steam online mode" leaves the engine
+**blocking on follow-on state the bridge doesn't fully deliver** (permanent loading screen); single-player
+works because that state is never required. **Correction 2026-06-04:** the earlier roadmap said the bridge
+*blacklists* `SteamServersConnected_t` (id 101) — that is **stale**. 101 was **un-blacklisted 2026-05-26**
+and is delivered whenever real Mac Steam emits it (the live blacklist is only 304 `PersonaStateChange_t` +
+1101 `UserStatsReceived_t`, and 101 is never synthesized). So the real unknowns are upstream — **does real
+Steam even emit 101 in our flow, is it dropped because the engine hasn't registered its handler yet, and
+what state (`BLoggedOn`, connected universe, friends list) does the engine poll afterward** — exactly what
+B1 instruments. **Online MP requires online mode** — genuine R&D, the highest-risk phase.
+
+**Update — the B1 capture (2026-06-04) answered this:** online mode IS reached and matchmaking works
+(`BLoggedOn`/universe healthy, `RequestLobbyList` → 50 real lobbies, callbacks deliver); 101 wasn't even
+needed. The actual blocker is Steam **rate-limiting** lobby create (`LimitExceeded`/25) and join
+(`RatelimitExceeded`/15). See the Status box above and B1 below.
 
 ## Implementation steps
 
@@ -339,16 +370,32 @@ execution order: the "fire 101" diagnosis stays first, listen-server hosting mov
 milestone, and the VAC check becomes an explicit gate at the end.)*
 
 ### B1. Diagnose the online-mode dependency chain
-**Do this first — everything below depends on knowing exactly what firing 101 triggers.** With a debug
-helper, **fire `SteamServersConnected_t` (id 101) after the main menu is reached** and capture exactly what
-the engine then polls/waits on. Expected dependents: `BLoggedOn() == true`, connected universe
-(`ISteamUtils`), `GetAuthSessionTicketResponse_t` (id 163, already drained), `SteamServerConnectFailure_t` /
-`SteamServersDisconnected_t` handling, and `PersonaStateChange_t` (id 304) where the engine walks a friends
-list we don't populate. **Output:** a concrete list of post-101 state the bridge must satisfy in B2–B3.
+> **CAPTURED 2026-06-04 — the dependency chain is already satisfied; the blocker is elsewhere.** First
+> `--diag-online` run (`/tmp/bridge.log`): `BLoggedOn()=1`, `GetConnectedUniverse()=1` (public), matchmaking
+> gate open, `RequestLobbyList` → 50 real lobbies, and `LobbyEnter`/`LobbyCreated`/`LobbyMatchList`/
+> `LobbyChatUpdate` callbacks all delivered to engine handlers — **no missing online state, and 101 was never
+> delivered yet online still proceeded.** The ONLY failures: `CreateLobby` → `result=25`
+> (`k_EResultLimitExceeded`) and joins → `resp=15` (`k_EChatRoomEnterResponseRatelimitExceeded`) — **Steam is
+> rate-limiting this account's lobby create/join.** CreateLobby params (type+max) forward correctly, so it's
+> not a bad-params bug. **Conclusion:** there is no online-mode/callback hang to fix; the work is to stop
+> tripping — and recover from — Steam's lobby rate limit (this reframes B2–B7). Enable with
+> `./play-l4d2.sh --diag-online`; grep guide in [07-debugging.md](07-debugging.md#online-mode-phase-3--b1-diagnostics).
+
+**Do this first — everything below depends on knowing exactly what online mode triggers.** 101 is *not*
+blacklisted (it's delivered whenever real Mac Steam emits it), so B1 **observes** rather than forces.
+Capture: (a) whether/when real Steam emits 101 (`[helper] real cb id=101`); (b) whether the engine has
+registered a 101 handler by then or the callback is dropped (`cb_fire id=101 -> 0 delivered`); (c) what the
+engine polls afterward — `BLoggedOn()`, `GetConnectedUniverse()`, `GetAuthSessionTicketResponse_t` (id 163,
+already drained), `SteamServerConnectFailure_t` / `SteamServersDisconnected_t`, and `PersonaStateChange_t`
+(id 304, the friends-list walk we currently suppress). If 101 never arrives naturally, the follow-up is to
+**synthesize it post-menu** (rolls into B2). **Output:** a concrete list of post-101 state the bridge must
+satisfy in B2–B3.
 
 ### B2. Enter online mode without hanging — fire 101 + satisfy the immediate state machine
 Turn B1's diagnosis into a bridge that *survives* online mode instead of suppressing it:
-- Un-blacklist **101**, but **gate it until after the menu** (avoid the early-init hang).
+- **101 is already un-blacklisted** (since 2026-05-26), so the work is timing, not un-gating: ensure the
+  engine registers its 101 handler before the callback fires (else it's dropped), and if real Steam doesn't
+  emit 101 in our flow, **synthesize it gated to after the menu** (avoid the early-init hang).
 - Return real `BLoggedOn`/connected-universe so the post-101 state machine completes.
 - **Populate the friends list** from real Mac Steam via the helper so the **304** (`PersonaStateChange_t`)
   handler succeeds instead of walking an empty list.
@@ -365,16 +412,121 @@ With online mode stable, complete the lobby state machine: deliver `LobbyEnter_t
 no flicker.
 
 ### B4. First end-to-end proof — listen-server hosting + friend join (FIRST MILESTONE)
+> **Lobby half PROVEN 2026-06-04** (once the rate-limit cleared): `CreateLobby` → `result=1` with a real
+> lobby (`01860000:77ff3caa`), and lobby joins → `resp=1` (Success). Local/online server creation from the
+> menu works. Remaining for full proof: a second machine actually connecting + play proceeding (needs a
+> friend / 2nd Steam account).
+
 The lowest-risk, most controllable end-to-end multiplayer test, and the **first** MP milestone. Host-side
 synthetic `GSClientApprove` already exists; verify a friend can **join a locally hosted listen-server game**
 (NAT-punched P2P via real Steam). Keep this on **non-VAC/community** footing per B7. **Exit criterion:** a
 friend connects to a game you host and play proceeds.
 
 ### B5. Join an official dedicated server via the server browser
-Verify `RequestInternetServerList` actually forwards real server rows into the game's
-`ISteamMatchmakingServersResponse` — the helper currently has a **no-op** `ServerResponded` vtable, so wire
-it to deliver real results. Then test `connect <ip>` to an official server. **Gated by B7** before any
-secured server.
+> **FIELD-TESTED 2026-06-05 — the server browser populates and joins succeed on non-VAC servers.** A live run
+> confirmed the full path end to end: `helper.log` logged `shipped N server-response envelope(s)` repeatedly,
+> the bridge re-dispatched 1600+ rows (`mms_resp: fake=1 type=0 iServer=…1672`), and — the decisive proof — the
+> engine then called `GetServerDetails` (`op=0x0707`), which it **never did before**. The user **joined an
+> unofficial dedicated server and started a game.** Two findings:
+> - **Official / VAC-secured servers fail to join — this is the [B7](#b7-auth--vac-safety-gate-clear-before-any-secured-server--applies-throughout) gate, not a B5 bug.** Official L4D2 servers run
+>   `sv_secure 1`; community servers commonly run `sv_secure 0`. The "non-VAC works / official fails" split is
+>   exactly the VAC boundary. **Do not pursue secured Valve servers without explicit sign-off (ban risk).**
+> - **Match filters were dropped, so the browser was unfiltered.** `mms_RequestInternetServerList` discarded the
+>   game's `ppchFilters`/`nFilters` and the helper queried `NULL,0`, so a campaign-mode request listed/joined
+>   **any-mode** servers — the user hit a community server that didn't allow campaign mode. **Fixed in
+>   [B5.1](#b51-forward-the-server-list-match-filters)** (2026-06-05): the filters are now serialized and
+>   forwarded; `[bridge] … filter[i]: key=val` and `[helper] MMS filter[N]: key=val` show what's sent (re-test pending).
+>
+> One cleanup from the test: the per-dispatch `detect_ret_clean` **WARN was a false positive** (its 64-byte scan
+> misreads a stray `0xc3` as `ret 0`) — `ret 8` is proven by the Wine test + 1600+ crash-free live dispatches, so
+> the misleading WARN was removed.
+>
+> **IMPLEMENTED 2026-06-05 — builds clean, unit/Wine-verified.** The three-part fix landed in
+> `bridge/steam_helper.c` + `bridge/steam_api_wine.c`: the helper's response-object callbacks **queue** events
+> (mutex-guarded) and ship them as `0xFFFFFFFD` drain envelopes, the bridge **re-dispatches** each into the
+> game's vtable via the new 2-arg `__thiscall` trampoline `thiscall_run2`, and `GetServerDetails` **repacks
+> `gameserveritem_t` pack(4)→pack(8)**. Pre-field-test verification: `thiscall_run2` under real Wine (correct
+> `this`/args + balanced stack), the `gameserveritem_t` offsets by compiling the SDK header (macOS
+> 372/`m_steamID`@364 → Windows 376/@368), and the drain envelope by a write→read round-trip test.
+>
+> **ROOT CAUSE FOUND 2026-06-04; fix designed + validated against Proton's `lsteamclient`.** A `--diag-online`
+> capture proved it: real Steam **does** find servers (`helper.log`: `noop_ServerResponded iServer=0,1,2,…22+`),
+> but the helper's `ISteamMatchmakingServerListResponse` is a **no-op** that drops every event, and the L4D2
+> engine **waits on those callbacks** — it never polls `GetServerCount`/`GetServerDetails` (RPC trace: `0x0700`
+> RequestInternetServerList fired, zero `0x070B`/`0x0707`). So the browser is fed nothing.
+>
+> **Validation (deep-research 2026-06-04).** Proton's `lsteamclient` — the Linux analog of this entire bridge
+> (the game's own `steam_api.dll` runs in Wine and loads `lsteamclient`, which proxies to the native Steam
+> client) — solves this exact case. Its callback pump `execute_pending_callbacks()` (run around
+> `Steam_BGetCallback`) pulls native callbacks, converts each native→Windows struct, and **re-dispatches into
+> the game's callback object via its vtable**; for the server browser it has a dedicated case
+> `CALL_IFACE_VTABLE_0_SERVER_RESPONDED` that calls **vtable slot 0** of the Windows
+> `ISteamMatchmakingServerListResponse`. That is exactly the drain → re-dispatch design below, so the plan is
+> confirmed correct (the "pass the response object straight through to native Steam" alternative was explicitly
+> **refuted**, 0-3). These server-browser callbacks are in Proton's `MANUAL_METHODS` — i.e. even Proton
+> hand-wires this, so it's the expected approach, not a hack. Refs: Proton `lsteamclient/steamclient_main.c` +
+> `gen_wrapper.py` (proton_9.0); Goldberg `steam_matchmaking_servers.cpp`.
+>
+> **The fix (implemented 2026-06-05) — forward the three response callbacks AND convert the row struct:**
+> 1. **Helper** — replace the no-op `ServerResponded`/`ServerFailedToRespond`/`RefreshComplete` with versions
+>    that **queue** `{hReq, iServer, type}` (**mutex-guarded** — Steam may fire these from its own thread), and
+>    drain the queue into `OP_DRAIN_CALLBACKS` as a new `0xFFFFFFFD` envelope.
+> 2. **Bridge DLL** — store the game's `pResponse` per request handle (currently discarded in
+>    `mms_RequestInternetServerList`); on draining a `0xFFFFFFFD` event, map the real `hReq` → fake handle and
+>    invoke `pResponse->vtable[type](pResponse, fakeHandle, iServer)` via a new 2-arg `__thiscall` trampoline
+>    (`thiscall_run2`, mirroring `thiscall_run0` but `ret 8`). For L4D2 the response is the modern
+>    `ServerResponded(hRequest, iServer)` form (confirmed — `helper.log` prints `iServer`), so no struct is
+>    passed here; `type` picks the vtable slot (0=Responded, 1=FailedToRespond, 2=RefreshComplete).
+> 3. **Convert `gameserveritem_t` in `GetServerDetails` — SECOND BUG, surfaced by the research.** Steamworks
+>    structs are **pack(8) on Windows but pack(4) on macOS**, yet `mms_GetServerDetails` returned the 400-byte
+>    row **raw**. So even once the list populates, the game would misread each row — notably the trailing
+>    `CSteamID m_steamID` (the value used to connect). **Confirmed by compiling the SDK header:** it shifts by
+>    exactly 4 bytes (macOS `m_steamID`@364, `sizeof` 372 → Windows @368, `sizeof` 376 — the pack(4) leaks in
+>    via `steamclientpublic.h`'s `#pragma pack(push,4)` even though `gameserveritem_t` isn't a callback struct).
+>    Added `repack_gameserveritem_pack4_to_pack8` (helper-side, like `repack_pack4_to_pack8`): copy the
+>    byte-identical first 364 B, insert a 4-byte pad, move the 8-byte SteamID, ship a zero-padded 400-byte frame
+>    so the bridge's fixed `g_mms_server_details_buf` still matches. Proton never hard-codes packing — it derives
+>    per-struct alignment from the compiler AST; our per-callback repack table is the manual equivalent, and
+>    `gameserveritem_t` was simply missing from it.
+>
+> Blast radius is contained — this path only runs during server browsing, so it can't regress the working
+> lobby path. One safety change does touch the shared drain: the bridge's `g_drain_buf` was enlarged 32 KB →
+> 256 KB to match the helper, since `rpc_call` **discards** any over-size drain whole — an undersized buffer
+> would have dropped lobby callbacks too once server-browser events shared a drain. *(vtable note: MSVC swaps
+> the first two virtuals of `CCallbackBase`'s two `Run` overloads — irrelevant here since `ServerResponded`
+> isn't overloaded, but a known trap for the `CCallback` path.)*
+
+`RequestInternetServerList` now forwards real server rows into the game's `ISteamMatchmakingServerListResponse`
+— the helper's former **no-op** `ServerResponded` vtable now queues and delivers real results (via the
+`0xFFFFFFFD` envelope path above), **field-confirmed 2026-06-05** (browse populates, join works on non-VAC).
+Joining a **secured** server is **gated by B7** (VAC).
+
+### B5.1 Forward the server-list match filters
+The 2026-06-05 field test surfaced this: `mms_RequestInternetServerList` had **dropped** the game's
+`ppchFilters` / `nFilters` (the helper queried real Steam with `NULL, 0`), so the server browser was
+**unfiltered** — a campaign-mode request could list and join an any-mode server (what bit the user). Now
+forwarded end to end:
+- **Bridge DLL** — serializes the game's filters into the `OP_MMS_REQUESTINTERNETSERVERLIST` arg: `u32 appid` +
+  `u32 nFilters` + `nFilters × {key\0 value\0}`. Plain `char`, so no pack(4)/pack(8) concern.
+- **Helper** — the per-op arg buffer grew 256 B → 4 KB; it rebuilds a native `MatchMakingKeyValuePair_t[]` + a
+  `MatchMakingKeyValuePair_t*[]` pointer array (capped at 16) and passes `(ptrs, nFilters)` to
+  `p_MMS_RequestInternetServerList` instead of `NULL, 0`.
+
+> **ABI CORRECTION (first field test, 2026-06-05).** The initial cut read `ppchFilters` as an **array of
+> pointers** (`fp[i]`, the Goldberg/Proton form). `helper.log` proved that wrong: `filter[0]=gamedir=left4dead2`
+> was right but `[1..5]` were heap/code garbage — and that garbage went **out to Steam**, which silently broke
+> the query (joining regressed to "can't join any" while the mode mismatch persisted). The truth: L4D2/Source
+> passes `&pFilters` where `pFilters` → a **single contiguous array** of `nFilters` structs (element 0 only
+> *looked* right because `*ppchFilters` IS the base). **Fixed:** deref `ppchFilters` once to get the base, then
+> index `base + i*512`; each struct read is `IsBadReadPtr`-guarded and **every key is validated as non-empty
+> printable ASCII** so a future misread can never ship garbage filters again (worst case it forwards only the
+> valid ones, e.g. `gamedir`, = pre-B5.1 behaviour). A native contiguous-read unit test passes (3 real filters +
+> a garbage one correctly skipped).
+
+**Verification:** builds clean; serialize→parse and contiguous-read unit tests pass. **Remaining:** re-test in
+game — `helper.log` should now show `MMS filter[1]=gametype=…` etc. as **clean** keys (not garbage), and a
+campaign browse should list **only** campaign-capable servers. (Friends/Favorites/History/Spectator lists stay
+filterless — Internet is L4D2's campaign path.)
 
 ### B6. Join a friend's game — lobby / "Join Game"
 Test the Steam-overlay/friends **Join Game** flow and the in-game lobby browser (`RequestLobbyList` →

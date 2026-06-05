@@ -29,6 +29,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `--debug` | Verbose Wine logging to stderr |
 | `--diag` | **Light** diagnostics → `game-stderr.log` (per-encoder GPU-fault log + DXVK info; playable) |
 | `--diag-gfx` | **Heavy** DXVK+MoltenVK+Metal validation (names OOB faults; big stutter; diagnostic only) |
+| `--diag-online` | **Steam-bridge / online-mode trace** (Phase 3 / B1) → `helper.log` + `/tmp/bridge.log`: which Steam callbacks (esp. 101 `SteamServersConnected_t`) and RPC ops the engine makes, plus `BLoggedOn`/`GetConnectedUniverse` values; playable, logging only |
 | `--wined3d` | Bypass DXVK; use Wine's native d3d9 → wined3d → MoltenVK (set `WINED3D_RENDERER=gl` for the GL backend). Serialises D3D9 (`mat_queue_mode 0`) for **that run only** — your pre-run `mat_queue_mode` is saved to a sidecar and restored on exit (and self-heals on the next launch if the run is hard-killed); no `autoexec.cfg` is persisted ([issue #9](03-known-issues.md), resolved in C1). |
 | `--help` | Usage |
 | `-- <args>` | Forward the rest to `left4dead2.exe`, e.g. `-- +map c1m1_hotel -windowed` |

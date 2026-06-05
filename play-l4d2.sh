@@ -250,6 +250,17 @@ while [[ $# -gt 0 ]]; do
     --max-settings)       ACTION=max-settings ;;
     --hud)            EXTRA_ENV+=("MTL_HUD_ENABLED=1") ;;
     --debug)          EXTRA_ENV+=("WINEDEBUG=warn+all,fixme-all") ;;
+    --diag-online)
+      # B1 / Phase-3 ONLINE diagnostics: turn on the Steam-bridge trace in BOTH
+      # halves — the Wine DLL (L4D2_BRIDGE_DEBUG → Z:\tmp\bridge.log) and the
+      # native helper (L4D2_HELPER_DEBUG → helper.log).  Captures which Steam
+      # callbacks (esp. 101 SteamServersConnected_t / 103 Disconnected / 304
+      # PersonaStateChange) and RPC ops the engine makes around the main menu
+      # and any host/join attempt, plus what BLoggedOn / GetConnectedUniverse
+      # return.  Playable — logging only, no perf hit.  See 07-debugging.md.
+      EXTRA_ENV+=("L4D2_BRIDGE_DEBUG=1")
+      export L4D2_HELPER_DEBUG=1
+      ;;
     --diag)
       # LIGHT diagnostics — playable.  Our MoltenVK per-encoder GPU-fault log
       # (names the faulting Metal encoder / Source pass on any 0x010c) plus
