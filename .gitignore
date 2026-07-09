@@ -34,6 +34,9 @@ bridge/sdk_old/
 
 # Logs
 *.log
+# Historical session logs swept out of the repo root (2026-07-09); new runs
+# still write helper.log / game-stderr.log / … to the root as before.
+archive/
 
 # macOS / editor noise
 .DS_Store

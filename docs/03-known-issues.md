@@ -116,11 +116,13 @@ Each issue lists **symptom → cause → workaround/status**. Task numbers (e.g.
 
 ---
 
-## 8. Durability: game-folder edits get reverted 
+## 8. Durability: game-folder edits get reverted — RESOLVED 2026-07-09 (A2 complete)
 
-**Symptom.** Launcher-managed config (`dxsupport.cfg`, `dxsupport_override.cfg`, `video.txt`) lives in the Steam game folder. A Steam "verify integrity of game files" or a game update regenerates these and silently reverts the edits. *(Note: this no longer re-breaks HDR — HDR is gated by a launch arg, since removed, and the engine runs `mat_dxlevel 100` regardless of the `dxsupport.cfg` dxlevel edits. The remaining concern is just losing the max-settings baseline.)*
+**Symptom.** Launcher-managed config (`dxsupport.cfg`, `dxsupport_override.cfg`, `video.txt`) lives in the Steam game folder. A Steam "verify integrity of game files" or a game update regenerates these and silently reverts the edits. *(Note: this no longer re-breaks HDR — HDR is gated by a launch arg, since removed, and the engine runs `mat_dxlevel 100` regardless of the `dxsupport.cfg` dxlevel edits. The remaining concern was just losing the max-settings baseline.)*
 
-**Fix (revised 2026-06-04 — opt-in, not silent).** The launcher no longer force-re-asserts `video.txt` every launch — that would clobber the player's saved settings (see [C2](08-roadmap.md#c2-single-source-of-truth-for-settings)). Instead, **`./play-l4d2.sh --max-settings`** re-applies the `video.txt` max baseline (`dxlevel 95` included) on demand, e.g. after a Steam file-verify; the first-run seed snapshots the original to `video.txt.orig-pre-launcher`. Still **TODO ([A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8))**: fold the **`dxsupport.cfg` / `dxsupport_override.cfg`** edits into the same `--max-settings`/re-apply step.
+**Fix (revised 2026-06-04 — opt-in, not silent).** The launcher no longer force-re-asserts `video.txt` every launch — that would clobber the player's saved settings (see [C2](08-roadmap.md#c2-single-source-of-truth-for-settings)). Instead, **`./play-l4d2.sh --max-settings`** re-applies the `video.txt` max baseline (`dxlevel 95` included) on demand, e.g. after a Steam file-verify; the first-run seed snapshots the original to `video.txt.orig-pre-launcher`.
+
+**Completed 2026-07-09 ([A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) remainder).** `play-l4d2.sh` gained **`assert_dxsupport`**, which re-applies the two **`dxsupport*.cfg`** edits idempotently on **every launch and on `--max-settings`**: `bin/dxsupport.cfg` block `"0"` → `maxdxlevel 98`/`dxlevel 95` (snapshot `dxsupport.cfg.orig-pre-dx95`), and the Apple `vendorid 0x106b` block appended to `dxsupport_override.cfg` at the next free index (snapshot `dxsupport_override.cfg.orig-pre-launcher`; the old `.pre-hdr-bak` is clobbered/unusable). Every-launch is safe **only** for these files because they're launcher-managed — no in-game menu writes them, and a player's dxlevel choice lives in `video.txt`, which latches over these defaults. `video.txt` itself stays opt-in via `--max-settings`, unchanged.
 
 ---
 
@@ -173,4 +175,5 @@ These were real blockers, now fixed — useful history if a regression appears:
 - **Constant-buffer slot collision** (`cbuffer_t` + push-const both at MSL buffer 0) → MVKPipelineLayout always reserves a push-constant slot per stage. `#36`
 - **32-bit address-space exhaustion at load** → DXVK memory-allocator handling (the reason 2.5.3 was explored). `#57`, `#60`
 - **Matchmaking pipe wedge / FreeLastCallback leak** → helper fix. `#43`
+- **Patched-MoltenVK re-install/re-sign on every launch** (fixed 2026-07-09) → `ensure_patched_moltenvk`'s idempotency check used `grep -q` in a pipeline under `set -o pipefail`; `-q` exits at the first match, `strings` (mid-way through ~10 MB of output) dies with SIGPIPE(141), and the pipeline reads as "not installed" — so every launch since the 2026-06-04 dylib rebuild silently re-installed AND re-signed the dylib with a fresh identifier, forcing Rosetta to rebuild its AOT translation each start (slower launches; harmless otherwise). Fix: plain `grep … >/dev/null` (reads all input, no SIGPIPE). The same latent pattern in `do_kill`'s process check (false "all clear" possible on a large `ps` stream) was fixed the same way.
 - **Steam DRM blocking-call loop** → `IsAPICallCompleted` + `GetAPICallResult` proxied through real Steam. `#5`

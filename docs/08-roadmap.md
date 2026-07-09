@@ -4,7 +4,9 @@
 single-player-only build to a **fully online-enabled** L4D2 with **proper HDR/DX9 shading**, with
 **maximum settings as the default** (the build is tuned for it) while **letting players change graphics
 settings and have them persist**, and make the whole wrapper **portable to any Apple Silicon Mac** by
-plugging in the real Steam values from that Mac's Steam app.
+plugging in the real Steam values from that Mac's Steam app — and ultimately **package it as a
+downloadable, notarized release** any Apple Silicon Mac can run
+([Phase 4](#phase-4--packaging--distribution), added 2026-07-09).
 
 > **Binding constraints for every phase:**
 > 1. **Max settings is the DEFAULT, not a cage** *(revised 2026-06-04)* — 4× MSAA, `mat_queue_mode -1`
@@ -36,7 +38,7 @@ The shading row below reflects this; see the [Phase 1](#phase-1--proper-shading-
 | `git HEAD` | `619cbd5` — *"docs and settings persistence update"* (2026-06-04; player settings now persist — see [C2](#c2-single-source-of-truth-for-settings)). Run `git log --oneline` for the live tip; full milestone lineage is in [01-current-state.md](01-current-state.md). |
 | In-game shading | **Full DX9.5 (`mat_dxlevel 100`), HDR playable (`mat_hdr_level 2`)** — proper HDR shading at max settings, **playable end-to-end** *(rendering fixed 2026-06-03, playability fixed 2026-06-04 — the `0x010c` device-lost is solved, see [Phase 1](#phase-1--proper-shading-hdr--dx95-at-max-settings) + [A0](#a0-fix-0x010c-device-lost-under-hdr--done-2026-06-04))* |
 | Multiplayer | **Not working** — bridge plumbing exists, but the engine is never put into Steam "online mode" |
-| `video.txt` dxlevel | Launcher **seeds** `setting.dxlevel 95` as the first-run default (C2, revised 2026-06-04); a player may change it (HDR needs ≥ DX9). `dxsupport.cfg` durability still pending — see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
+| `video.txt` dxlevel | Launcher **seeds** `setting.dxlevel 95` as the first-run default (C2, revised 2026-06-04); a player may change it (HDR needs ≥ DX9). `dxsupport.cfg` durability **DONE 2026-07-09** — `assert_dxsupport` re-applies the edits idempotently on every launch and on `--max-settings`; see [A2](#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8) |
 | Multicore | `mat_queue_mode -1` (**on by default**), seeded in `video.txt`; **player-changeable + persists** (revised 2026-06-04). The `--wined3d` landmine is fixed (now self-heals via a sidecar) — see [C1](#c1-neutralise-the-multicore-landmine-must-fix) |
 | DXVK | **1.10.3** deployed (working). **2.5.3** explored 2026-06-02 (allocator angle) but **ruled out as the HDR lever** — a fully-patched 2.5.3 renders identically to 1.10.3; HDR was never a DXVK problem (see [A1, SUPERSEDED](#a1-swap-to-dxvk-253-and-confirm-the-hdr-format--superseded)) |
 | Stack | Whisky-Wine 11 · MoltenVK 1.4.1 + patch · Rosetta 2 · macOS 26.x · M4 Pro |
@@ -122,6 +124,18 @@ perf nit, issue #5), not a blocker.
 > **all moot for HDR**. None of them was the lever; the fix was removing one launch arg.
 
 ### A2. Re-assert DX9.5 everywhere (and make it durable — fixes issue #8)
+> **DONE 2026-07-09.** `play-l4d2.sh` gained **`assert_dxsupport`**, which re-applies both dxsupport
+> edits **idempotently on every launch AND on `--max-settings`**: `bin/dxsupport.cfg` block `"0"` →
+> `maxdxlevel 98` / `dxlevel 95` (one-time snapshot `dxsupport.cfg.orig-pre-dx95`), and
+> `left4dead2/dxsupport_override.cfg` → the Apple `vendorid 0x106b` block appended at the **next free
+> top-level index** (snapshot `dxsupport_override.cfg.orig-pre-launcher`, taken only when the file
+> genuinely lacks the block — the older `.pre-hdr-bak` was clobbered and is not a usable original).
+> Every-launch is safe here because these are **launcher-managed GPU-database entries** no in-game
+> menu ever writes — a player's dxlevel choice lives in `video.txt`, which latches over these
+> defaults — so unlike the C2-governed `video.txt` there is no player choice to respect. Verified
+> against a fixture simulating a full Steam revert (stock block "0", no 0x106b block): re-applies
+> exactly the 2 value lines + the appended block, byte-identical on a second run.
+>
 > **Note 2026-06-03:** DX9.5 is **confirmed already in effect** (`mat_dxlevel 100`, read via VScript probe) — it
 > was never the HDR gate (HDR was pinned off by `+mat_hdr_level 1`, since fixed; see Phase 1 box). A2 remains a
 > valid **durability** task: keep the max-settings/`dxlevel 95` block from being silently reverted by a Steam
@@ -138,7 +152,9 @@ perf nit, issue #5), not a blocker.
   This is lower-stakes than once thought: HDR does **not** depend on the `dxsupport.cfg` dxlevel edits (the
   engine runs `mat_dxlevel 100` regardless; HDR was gated by a launch arg, since removed), so a reverted
   `dxsupport.cfg` no longer re-breaks HDR. Making the two `dxsupport*.cfg` edits re-appliable via the same
-  `--max-settings`/re-apply step is the remaining A2 scope.
+  `--max-settings`/re-apply step is the remaining A2 scope. *(Done 2026-07-09 — see the DONE box above;
+  the re-apply also runs on every normal launch, which is strictly better durability at zero risk to
+  player choices.)*
 
 ### A3. Tonemapping without the M4 AGX auto-exposure crash
 > **Update 2026-06-03:** HDR is now fully ON by default (the `+mat_hdr_level 1` arg that forced fullbright is
@@ -697,6 +713,85 @@ from the Mac Steam client, so the player authenticates as their genuine account.
 Wine + a custom `steam_api.dll` on a VAC-secured official server carries a real (if small) VAC-ban risk.**
 Plan: do all first-time MP (B4–B6) on **listen-server + friend-join** and **non-VAC/community** servers;
 **get explicit user sign-off before joining secured Valve official servers.**
+
+---
+
+# Phase 4 — Packaging & distribution
+
+> **ADDED 2026-07-09 · NOT STARTED.** Goal: a **downloadable, notarized release** that any Apple
+> Silicon Mac can run — the natural end-state of the Phase 2 "any Mac" goal, using the same
+> notarized-launcher release discipline already proven on Sporeholm (`release.sh`, Developer ID +
+> notarization). **Gate:** don't cut a public release before Phase 2 validation (D4 clean-Mac build,
+> D5 non-M4 hardware) — a single-player-only beta may ship before Phase 3 (MP join) stabilizes, with
+> MP documented as in-progress.
+>
+> **The repo is NOT currently redistributable — P1 is a hard prerequisite for making it public or
+> shipping sources.** Everything else here can proceed in any order.
+
+### P1. Restructure the Steamworks SDK out of the repo (MUST-FIX before any public release)
+`bridge/sdk/` (and the gitignored `bridge/sdk_old/`) contain **Valve Steamworks SDK headers**
+(1.53a + the ISteamTimeline header from 1.60). The Steamworks SDK license does **not** permit
+redistributing the SDK, so these headers must leave the tracked tree before the repo can go public:
+- Convert to **fetch-on-build**: `build-deps.sh` gains a step that takes a user-supplied Steamworks
+  SDK zip (downloadable with any Steam account from
+  [partner.steamgames.com](https://partner.steamgames.com/downloads/list)) — or an env var pointing
+  at one — verifies the version (pin 1.53a; warn on drift), and extracts just the headers the bridge
+  build needs into an untracked `bridge/sdk/`. Same pattern the launcher already uses for
+  Whisky-Wine/GPTK (download-at-setup, never redistribute).
+- `gen_vtables.py` already regenerates `vtables_generated.c` from those headers, so the **generated**
+  file stays untracked too (it embeds SDK-derived layouts); it is rebuilt after the fetch step.
+- History note: making the repo public also requires the SDK headers to be absent from **git
+  history** (they've been tracked since the initial commit) — that means a history rewrite or, far
+  simpler, a **fresh public repo** cut from a cleaned tree. Decide at release time; the private
+  origin can stay as-is.
+- Alternative considered: swapping to a clean-room/reimplemented header set (Goldberg-style). Parked
+  — license review of those sources is its own project, and fetch-on-build fully solves ours.
+
+### P2. Define the distribution unit (bundle what we may, download the rest)
+A small **notarized `.app`** (Sporeholm-launcher pattern) wrapping `play-l4d2.sh` + the bridge
+sources/build, with first-run downloads for everything not redistributable. Redistribution matrix:
+| Component | License | Ship in bundle? |
+|---|---|---|
+| Our launcher + bridge **source** | ours | Yes (after P1) |
+| Bridge **binaries** (`steam_api.dll`, `steam_helper`) | ours, built against SDK headers | Prefer **build-on-device** at first run (they compile in seconds); shipping prebuilt needs a Steamworks-license read first |
+| DXVK 1.10.3 + our patch | **zlib** | Yes — binary + patch, with license text |
+| MoltenVK 1.4.1 + our patch | **Apache-2.0** | Yes — with NOTICE/attribution |
+| Whisky-Wine 11 | Wine is **LGPL-2.1+** | Keep **download-on-first-run** from Whisky's releases (as today) — sidesteps hosting + LGPL source-offer obligations |
+| Game Porting Toolkit (Gcenx repack) | **Apple license — not redistributable** | Never bundle; keep the existing optional download (it's only the `--wined3d` fallback) |
+| Steamworks SDK headers | Valve | Never — fetch-on-build (P1) |
+| Game content / `dxsupport` edits | player's own install | n/a — applied in place, snapshotted, reversible |
+
+### P3. Stranger-proof the first run (extends D6)
+D6 covers the happy path on a prepared Mac. A distributed build meets Macs with no Xcode CLT, no
+Rosetta, Steam in a nonstandard library, or L4D2 not installed: every preflight needs a
+plain-language failure message + next step. Also ship the **B7 VAC caution** in the end-user docs —
+the bundle proxies the player's **real Steam identity** into a Wine process; secured-server risk
+must be the player's informed choice, not fine print.
+
+### P4. Release mechanics
+`release.sh`-style one-command build: clean build of bridge/DXVK/MoltenVK from tags+patches, codesign
+with Developer ID, notarize + staple, produce a versioned dmg/zip + changelog. Semver the launcher
+(the script currently has no version identity). Updates: manual download first; Sparkle only if
+cadence ever justifies it.
+
+### P5. Upstreaming (shrink the patch surface before packaging)
+Checked 2026-07-09:
+- **DXVK — nothing to upstream; the patch is 1.10.3-only.** The `pushConstSize` copy-paste bug our
+  patch fixes is **already fixed upstream in 2.x** (v2.5.3 sets
+  `info.pushConstSize = sizeof(D3D9RenderStateInfo)` — the whole render-state block), and current
+  master **deleted the DXSO module entirely** (June 2026 D3D9 shader-path rework). The fix rides in
+  `shadow-sampler-workaround.patch` for as long as we pin 1.10.3 (2.5.3 stays ruled out per A1 —
+  identical rendering, no need to move).
+- **MoltenVK — file our issue upstream.** Upstream is **still v1.4.1** (the exact version we patch),
+  and the attachment-less-pass problem class is **known but unresolved** there
+  ([#1650](https://github.com/KhronosGroup/MoltenVK/issues/1650) hit it as a memory explosion;
+  maintainer PR [#1802](https://github.com/KhronosGroup/MoltenVK/pull/1802) was closed unmerged
+  in 2024). Our AGX **hard-abort** evidence (empty attachment-less encoder faults on its own;
+  16384×16384 extent; clamp-to-2048 or skip both cure it) is a new, stronger failure mode for that
+  discussion. **Draft ready to file (user's call):**
+  [docs/upstream/moltenvk-attachmentless-agx-abort.md](upstream/moltenvk-attachmentless-agx-abort.md).
+  An upstream fix would eventually let the deployed MoltenVK drop to a smaller patch (or none),
+  shrinking what P2 has to build and ship.
 
 ---
 

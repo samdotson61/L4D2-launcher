@@ -158,7 +158,9 @@ do_kill() {
   pkill -9 -f "steam_helper"               2>/dev/null || true
   pkill -9 -f "log stream"                 2>/dev/null || true
   sleep 1
-  if ps -axo command 2>/dev/null | grep -v grep | grep -qiE "left4dead2|whisky-wine/Libraries/Wine|steam_helper"; then
+  # (plain grep >/dev/null, not -q: under pipefail, -q's early exit can SIGPIPE
+  #  a large `ps` stream and turn a genuine match into a false "all clear")
+  if ps -axo command 2>/dev/null | grep -v grep | grep -iE "left4dead2|whisky-wine/Libraries/Wine|steam_helper" >/dev/null; then
     warn "Some processes may still be alive — run '$0 --kill' again or: ps -ax | grep -i wine"
   else
     ok "All L4D2/wine/helper processes cleared."
@@ -191,9 +193,11 @@ Usage:
                                    the account the bridge will authenticate as (D3)
   play-l4d2.sh --max-settings      Re-apply the recommended MAX graphics baseline to
                                    video.txt (resolution, 4× MSAA, multicore, 16× aniso,
-                                   gpu_level 3, dxlevel 95). Normally your in-game
-                                   settings changes persist; use this to reset to max
-                                   (e.g. after a Steam "verify integrity" regenerates it).
+                                   gpu_level 3, dxlevel 95) AND the dxsupport DX9.5
+                                   edits (bin/dxsupport.cfg block 0 + the Apple 0x106b
+                                   override). Normally your in-game settings changes
+                                   persist; use this to reset to max (e.g. after a
+                                   Steam "verify integrity" regenerates these files).
   play-l4d2.sh --hud               Enable Metal/D3DMetal performance HUD
   play-l4d2.sh --debug             Verbose Wine logging to stderr
   play-l4d2.sh --diag              LIGHT, playable diagnostics → game-stderr.log
@@ -375,7 +379,13 @@ ensure_patched_moltenvk() {
   [[ -f "$target"  ]] || { warn "Whisky MoltenVK missing at $target"; return 0; }
 
   # Idempotency: check for our patch's unique label string.
-  if strings "$target" 2>/dev/null | grep -q '^MVKDummyNullDescriptorBuffer$'; then
+  # NOTE: no `grep -q` here — under `set -o pipefail`, -q exits at the first
+  # match and `strings` (still writing ~10 MB of output) dies with SIGPIPE(141),
+  # failing the whole pipeline. That false-negative made every launch re-install
+  # AND re-sign the dylib with a fresh identifier, forcing Rosetta to rebuild
+  # its AOT translation each start. Plain grep reads all input, so strings
+  # always exits 0.
+  if strings "$target" 2>/dev/null | grep '^MVKDummyNullDescriptorBuffer$' >/dev/null; then
     ok "Patched MoltenVK already installed"
     return 0
   fi
@@ -861,12 +871,78 @@ assert_max_settings() {
   fi
 }
 
+# A2 / issue #8 — make the dxsupport DX9.5 edits durable.  Unlike video.txt, these two
+# files are LAUNCHER-managed GPU-database entries — no in-game menu ever writes them, so
+# re-asserting can never clobber a player choice (a player's dxlevel choice lives in
+# video.txt, which latches over these defaults; maxdxlevel is only a cap).  A Steam
+# "verify integrity" / game update regenerates bin/dxsupport.cfg (and possibly the
+# override), silently reverting the edits — so this runs on EVERY launch and on
+# --max-settings, idempotently:
+#   • bin/dxsupport.cfg block "0" (the unmatched-GPU fallback entry): raise
+#     maxdxlevel 90→98 / dxlevel 90→95.  One-time snapshot: dxsupport.cfg.orig-pre-dx95.
+#   • left4dead2/dxsupport_override.cfg: ensure the explicit Apple block — vendorid
+#     0x106b (all device ids) → mindxlevel 90 / maxdxlevel 98 / dxlevel 95 — appended at
+#     the next free top-level index.  Snapshot: dxsupport_override.cfg.orig-pre-launcher,
+#     taken only when the file genuinely lacks the block (the older .pre-hdr-bak was
+#     clobbered — it's identical to the edited file — so it is NOT a usable original).
+# These edits are MOOT for HDR (the engine runs mat_dxlevel 100 regardless — see
+# 03-known-issues #8); they preserve the max-settings dxlevel baseline across verifies.
+assert_dxsupport() {
+  local dxs="$GAME_DIR/bin/dxsupport.cfg"
+  local ovr="$GAME_DIR/left4dead2/dxsupport_override.cfg"
+  local fixed=0
+
+  # ── bin/dxsupport.cfg block "0": maxdxlevel 98 / dxlevel 95 ───────────────
+  if [[ -f "$dxs" ]]; then
+    local blk0
+    blk0="$(awk '/^\t"0"[[:space:]]*$/{f=1} f{print} f&&/^\t\}/{exit}' "$dxs")"
+    if ! { grep -q '"setting\.maxdxlevel"[[:space:]]*"98"' <<<"$blk0" \
+        && grep -q '"setting\.dxlevel"[[:space:]]*"95"'    <<<"$blk0"; }; then
+      [[ -f "$dxs.orig-pre-dx95" ]] || cp "$dxs" "$dxs.orig-pre-dx95"
+      perl -i -pe 'if (/^\t"0"\s*$/ .. /^\t\}/) {
+                     s/("setting\.maxdxlevel"\s+)"[^"]*"/$1"98"/;
+                     s/("setting\.dxlevel"\s+)"[^"]*"/$1"95"/;
+                   }' "$dxs"
+      warn "bin/dxsupport.cfg block \"0\" was stock (Steam verify/update?) — re-applied maxdxlevel 98 / dxlevel 95"
+      fixed=$((fixed+1))
+    fi
+  else
+    warn "bin/dxsupport.cfg not found — skipping dxlevel edit (verify L4D2's files in Steam)"
+  fi
+
+  # ── dxsupport_override.cfg: explicit Apple-vendor DX9.5 block ─────────────
+  if ! grep -q '"vendorid"[[:space:]]*"0x106b"' "$ovr" 2>/dev/null; then
+    if [[ -f "$ovr" ]]; then
+      [[ -f "$ovr.orig-pre-launcher" ]] || cp "$ovr" "$ovr.orig-pre-launcher"
+    else
+      # Stock file absent (unusual) — create a minimal valid KeyValues wrapper.
+      printf '"dxsupport"\n{\n}\n' > "$ovr"
+    fi
+    # Append our block at the next free top-level index ("0"/"1"/… at one-tab depth),
+    # so a game update that adds stock blocks can't collide with ours.
+    local idx
+    idx="$(awk -F'"' 'BEGIN{m=-1} /^\t"[0-9]+"[[:space:]]*$/{ if ($2+0 > m) m = $2+0 } END{ print m+1 }' "$ovr")"
+    L4D2_IDX="$idx" perl -0777 -i -pe \
+      's/\}\s*\z/\t"$ENV{L4D2_IDX}"\n\t{\n\t\t"name" "Apple Silicon - force DX9.5 (launcher-managed, A2)"\n\t\t"vendorid"\t"0x106b"\n\t\t"mindeviceid"\t"0x0"\n\t\t"maxdeviceid"\t"0xffffffff"\n\t\t"setting.mindxlevel"\t"90"\n\t\t"setting.maxdxlevel"\t"98"\n\t\t"setting.dxlevel"\t"95"\n\t}\n}\n/' "$ovr"
+    warn "dxsupport_override.cfg lacked the Apple 0x106b block (Steam verify/update?) — appended it as block \"$idx\""
+    fixed=$((fixed+1))
+  fi
+
+  if [[ "$fixed" == 0 ]]; then
+    ok "dxsupport DX9.5 edits in place (bin block \"0\" + Apple 0x106b override)"
+  else
+    ok "Re-applied dxsupport DX9.5 edits ($fixed file(s) — durable per A2/issue #8)"
+  fi
+}
+
 # --max-settings — deliberately re-apply the recommended max baseline to video.txt
-# (e.g. after a Steam "verify integrity" regenerates it, or to undo experimentation).
+# and the dxsupport DX9.5 edits (e.g. after a Steam "verify integrity" regenerates
+# them, or to undo experimentation).
 # Normal launches respect your saved settings; this is the explicit opt-in reset.
 do_max_settings() {
-  say "Re-applying the recommended max-settings baseline to video.txt…"
+  say "Re-applying the recommended max-settings baseline (video.txt + dxsupport)…"
   FORCE_MAX=1 assert_max_settings
+  assert_dxsupport
 }
 
 do_launch() {
@@ -889,6 +965,9 @@ do_launch() {
   # C2/C1: guarantee max settings (and clear any stale multicore landmine) before
   # every launch, so the DXVK path is never silently downgraded.
   assert_max_settings
+  # A2: keep the launcher-managed dxsupport DX9.5 edits durable across Steam
+  # file-verifies/updates (idempotent; can't touch player choices — see function).
+  assert_dxsupport
 
   say "Launching L4D2 — close the game window to return here."
   # If using Whisky's bundled Wine, set DYLD_FALLBACK_LIBRARY_PATH so its

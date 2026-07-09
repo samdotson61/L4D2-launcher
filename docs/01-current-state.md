@@ -68,8 +68,9 @@ defaultres 1512 × 982, windowed (fullscreen 0), no border (nowindowborder 1)
 >
 > **`setting.dxlevel 95`** is part of the seeded baseline (not in the static listing above because the launcher
 > adds it on first run / `--max-settings`, snapshotting the original to `video.txt.orig-pre-launcher` first).
-> dxlevel-forcing alone does **not** enable HDR; making the `dxsupport.cfg` edits re-appliable is the rest of
-> [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).
+> dxlevel-forcing alone does **not** enable HDR; the `dxsupport.cfg` edits are re-appliable since
+> 2026-07-09 — `assert_dxsupport` runs on every launch and on `--max-settings`
+> ([A2, DONE](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8)).
 >
 > **`defaultres`/`defaultresheight` are auto-detected per-Mac (D2, DONE 2026-06-04)** — no longer pinned to this
 > 14" MacBook's 1512×982. `detect_resolution()` (`L4D2_RES` override → AppKit `NSScreen` → `system_profiler`)
@@ -111,9 +112,10 @@ MVK_CONFIG_FAST_MATH_ENABLED=0            (fast-math NaN/Inf in tonemap faults A
   commits. The patched `libMoltenVK.dylib`'s attachment-less-skip fix rides in the tracked session patch (the
   built dylib stays out of git — see below).
 - **`DEFAULT_GAME_ARGS`** carries **4× MSAA + multicore** (`mat_queue_mode -1`) + max textures.
-- **Stash:** `stash@{0}` (WIP on `38dc236`) still holds in-progress launcher edits (clean-quit extended
-  to the normal launch path, an `L4D2_FORCE_HDR` video.txt toggle, `L4D2_MVK_MTLHEAP` override,
-  updated PREFILL comments) — not yet applied.
+- **Stash:** none (verified empty 2026-07-09). The old `stash@{0}` (WIP on `38dc236`) was dropped;
+  of its contents, the `L4D2_MVK_MTLHEAP` override landed in `play-l4d2.sh` via later commits, and the
+  `L4D2_FORCE_HDR` video.txt toggle is moot (HDR is the engine default since the `+mat_hdr_level 1`
+  launch-arg removal — forcing it is no longer needed).
 - **Not in git:** the patched `libMoltenVK.dylib` and `dxvk_d3d9.dll` binaries (rebuildable from
   source via `build-deps.sh` + the tracked `.patch` files); the game-folder config edits.
 
@@ -122,4 +124,4 @@ MVK_CONFIG_FAST_MATH_ENABLED=0            (fast-math NaN/Inf in tonemap faults A
 > is **online multiplayer** (Phase 3) and **cross-Mac validation** of the now-code-complete portability work
 > (Phase 2 — D4 clean-Mac build, D5 non-M4 test) — see [08-roadmap.md](08-roadmap.md).
 
-> The `dxsupport.cfg` / `dxsupport_override.cfg` / `video.txt` edits live in the **Steam game folder**, not this repo. A Steam "verify integrity of game files" or game update will regenerate `bin/dxsupport.cfg` (and `video.txt`). Note HDR no longer depends on these edits — the engine runs `mat_dxlevel 100` regardless and HDR is gated by a launch arg (since removed) — so a revert won't re-break HDR. Since the launcher now **seeds** `video.txt` rather than re-asserting it every launch (so player settings persist — [C2](08-roadmap.md#c2-single-source-of-truth-for-settings)), recover the max baseline after a Steam file-verify by running **`./play-l4d2.sh --max-settings`**; making the **`dxsupport*.cfg`** edits re-appliable the same way is the rest of [A2](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8).
+> The `dxsupport.cfg` / `dxsupport_override.cfg` / `video.txt` edits live in the **Steam game folder**, not this repo. A Steam "verify integrity of game files" or game update will regenerate `bin/dxsupport.cfg` (and `video.txt`). Note HDR no longer depends on these edits — the engine runs `mat_dxlevel 100` regardless and HDR is gated by a launch arg (since removed) — so a revert won't re-break HDR. Since the launcher now **seeds** `video.txt` rather than re-asserting it every launch (so player settings persist — [C2](08-roadmap.md#c2-single-source-of-truth-for-settings)), recover the max baseline after a Steam file-verify by running **`./play-l4d2.sh --max-settings`**. The **`dxsupport*.cfg`** edits need no manual step at all since 2026-07-09: `assert_dxsupport` re-applies them idempotently on **every launch** (and on `--max-settings`) — safe because no in-game menu writes those files ([A2, DONE](08-roadmap.md#a2-re-assert-dx95-everywhere-and-make-it-durable--fixes-issue-8)).

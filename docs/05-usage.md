@@ -19,7 +19,7 @@ The single entry point is **`~/L4D2-launcher/play-l4d2.sh`**.
 | `--build-bridge` | Compile `steam_api.dll` + `steam_helper` only |
 | `--install-bridge` | Install bridge DLL + apply on-disk binary patches + copy `steam.dll`/`GameOverlayRenderer.dll` |
 | `--steam-check` | Verify the macOS Steam client is running + signed in, and show the persona/SteamID the bridge will authenticate as (D3) |
-| `--max-settings` | Re-apply the recommended **max graphics baseline** to `video.txt` (resolution, 4× MSAA, multicore, 16× aniso, `gpu_level 3`, `dxlevel 95`). Normal launches **respect your saved settings**; use this to reset to max (e.g. after a Steam "verify integrity" regenerates `video.txt`). |
+| `--max-settings` | Re-apply the recommended **max graphics baseline** to `video.txt` (resolution, 4× MSAA, multicore, 16× aniso, `gpu_level 3`, `dxlevel 95`) **and the dxsupport DX9.5 edits** (`bin/dxsupport.cfg` block "0" + the Apple `0x106b` override — these two also self-heal on every normal launch, since no in-game menu writes them). Normal launches **respect your saved settings**; use this to reset `video.txt` to max (e.g. after a Steam "verify integrity" regenerates these files). |
 | `--install-goldberg` / `--uninstall-goldberg` | Swap in/out the Goldberg shim (alternative to our bridge) |
 | `--install-steam` / `--steam` | Install / launch Steam-for-Windows in the prefix |
 | `--link-game` | Symlink an existing L4D2 install into the prefix's Steam library (avoid re-download) |

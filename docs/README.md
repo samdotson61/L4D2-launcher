@@ -11,7 +11,8 @@
 
 Runs **Left 4 Dead 2** (the 32-bit Windows build) on Apple Silicon, signed in to your real Steam
 account. **Single-player is playable today, and HDR is now playable at max settings** — the GPU device-lost fault that used to make HDR-on freeze is fixed (2026-06-04; see [issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). **Online multiplayer** and
-**portability to any Apple Silicon Mac** are the remaining active work — see the **[Roadmap](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md)**.
+**portability to any Apple Silicon Mac** are the remaining active work, with a **packaged, notarized
+release** as the end-state (Phase 4, added 2026-07-09) — see the **[Roadmap](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md)**.
 
 Left 4 Dead 2's native macOS build is 32-bit (i386). macOS dropped 32-bit support at Catalina, and
 Rosetta 2 only translates 64-bit x86 — so the Mac binaries are dead and Valve isn't updating them.
@@ -21,14 +22,14 @@ turnkey installer.
 
 ## Status at a glance
 
-Current baseline: `git HEAD 9a5dedf` (*"working and playable my boy"*, committed 2026-06-04) — the **2026-06-03 HDR-rendering fix** and the **2026-06-04 HDR-playability fix** are now committed; HDR renders **and is playable** at max settings (see the HDR row).
+Current baseline (no HEAD pin — run `git log --oneline` for the tip): the **2026-06-03 HDR-rendering fix**, the **2026-06-04 HDR-playability fix**, the **D1–D6 portability work**, and the **Phase-3 MP-join diagnosis chain** (through the proactive `AcceptP2PSessionWithUser` fix — LAN re-test pending) are all committed on `main`; HDR renders **and is playable** at max settings (see the HDR row).
 
 | Aspect | State |
 |---|---|
 | Launches to main menu | Working |
 | Loads into a campaign (renders, HUD, weapons, bots) | Working (single-player) |
 | Framerate (native res, max settings) | ~90–130 fps on the test map |
-| Max settings (4× MSAA + multicore + max textures) | **Default, not forced** — the launcher seeds the max baseline on first run; in-game Options → Video changes then persist across restarts (`--max-settings` re-applies max). *(policy revised 2026-06-04, C2)* |
+| Max settings (4× MSAA + multicore + max textures) | **Default, not forced** — the launcher seeds the max baseline on first run; in-game Options → Video changes then persist across restarts (`--max-settings` re-applies max, and the launcher-managed `dxsupport*.cfg` DX9.5 edits **self-heal on every launch** — A2 done 2026-07-09). *(policy revised 2026-06-04, C2)* |
 | **HDR / tonemapping + DX9 shading** | **Playable** — rendering fixed 2026-06-03 (was our own `+mat_hdr_level 1` pin; removed → engine default = full HDR, at DX9.5 `mat_dxlevel 100`); **playability fixed 2026-06-04** — the `0x010c` device-lost was an **attachment-less render pass** (a 16384×16384 pass with zero attachments hard-aborts the AGX GPU), now skipped in patched MoltenVK. User played levels 1→2 with no freeze/crash; 0 faults in 150 s runs. Only residual: an occasional stutter ([issue #5](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)). ([issue #2](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)) |
 | Flashlight shadow | On (`r_flashlightdepthtexture 1`) — dynamic shadows render |
 | **Online / multiplayer** | **Self-HOST works (now on the correct-gamemode server, B5.1); JOINING does NOT (re-test 2026-06-05).** Online mode + lobby **create** confirmed, and the server browser **populates** (helper forwards `ServerResponded` → engine; 1600+ rows re-dispatched; `gameserveritem_t` repacked pack(4)→pack(8)). But **selecting a browsed non-VAC dedicated server fails to connect**, and the **in-game lobby-browser join also fails** — so join (B5/B6) is the **top open blocker**, and it's **not** the VAC gate. **Diagnosed 2026-06-05:** lobby join succeeds (`LobbyEnter_t`) but the P2P game-handshake is **inbound-dead** (~470 packets sent, **0** received back); a LAN test (both directions) failed with `P2PSessionConnectFail err=4` + zero inbound, isolating the cause: modern Steam runs legacy P2P on the **SDR relay backend**, which the helper never bootstrapped via **`InitRelayNetworkAccess()`**. Fix validated (relay reached "Current") but necessary-not-sufficient. A Proton/Goldberg deep-dive then found the real cause — legacy P2P drops inbound until the receiver calls AcceptP2PSessionWithUser; the helper now proactively accepts known peers (LAN re-test pending). Official/VAC servers are the separate B7 gate → [Phase 3](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) |
@@ -68,7 +69,8 @@ byte-identical** — edit both together.
 | [05 — Usage](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/05-usage.md) | `play-l4d2.sh` commands, env-var overrides, game configs |
 | [06 — Building](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/06-building.md) | Building DXVK / MoltenVK / the bridge from source |
 | [07 — Debugging](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/07-debugging.md) | The diagnostic harness, log files, reading dxlevel/HDR/fault state |
-| **[08 — Roadmap](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md)** | **The phased plan** → online + HDR/DX9 + any-Mac port, at max settings |
+| **[08 — Roadmap](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md)** | **The phased plan** → online + HDR/DX9 + any-Mac port + packaged release (Phase 4), at max settings |
+| [upstream/](https://github.com/samdotson61/L4D2-launcher/tree/main/docs/upstream) | Draft upstream issue reports (MoltenVK attachment-less AGX abort — ready to file, user's call) |
 
 ---
 
@@ -120,7 +122,7 @@ Tracked source (this is the source of truth):
 | `bridge/steam_helper.c` | native arm64 Steam proxy |
 | `bridge/gen_vtables.py` | generates ABI-correct vtables from the SDK headers |
 | `bridge/steam_api.def` | DLL export list |
-| `bridge/sdk/` | Steamworks SDK 1.53a headers (vtable-generation input) |
+| `bridge/sdk/` | Steamworks SDK 1.53a headers (vtable-generation input; **not redistributable** — moves to fetch-on-build in [Phase 4 / P1](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/08-roadmap.md) before any public release) |
 | `dxvk-build/shadow-sampler-workaround.patch` | our DXVK source patch |
 | `moltenvk-build/session-patches/moltenvk-all-edits-latest.patch` | our MoltenVK source patch (incl. the attachment-less-skip `0x010c` HDR fix) |
 | `docs/` | the documentation in this index (kept in lockstep with the code) |
@@ -128,8 +130,9 @@ Tracked source (this is the source of truth):
 
 Git-ignored (regenerated by the scripts, or multi-GB runtime state): `prefix/`, `whisky-prefix/`,
 `whisky-wine/`, `Game Porting Toolkit.app/`, the built binaries (`steam_api.dll`, `steam_helper`,
-`dxvk_d3d9.dll`, `libMoltenVK.dylib`, `vtables_generated.c`), `dxvk-shaders/`, `*.log`, and the superseded
-`bridge/steam_api_wine.cpp` / `bridge/sdk_old/`.
+`dxvk_d3d9.dll`, `libMoltenVK.dylib`, `vtables_generated.c`), `dxvk-shaders/`, `*.log`, `archive/`
+(historical session logs, swept out of the root 2026-07-09 — new runs still write their logs to the
+root), and the superseded `bridge/steam_api_wine.cpp` / `bridge/sdk_old/`.
 
 ---
 
@@ -189,7 +192,9 @@ Rebuilt by `build-deps.sh bridge`. No upstream; it's ours.
   same Metal texture slot as the color sampler (SPIRV-Cross emits two `[[texture(N)]]` decls at one slot,
   Metal rejects). We emit a regular sample then do `(sampled.r >= ref) ? 1 : 0` in SPIR-V.
 - **pushConstSize fix** — stock DXVK assigned the push-constant *size* from the *offset* (copy-paste bug) →
-  too-small range → per-frame Metal device fault.
+  too-small range → per-frame Metal device fault. *(Fixed upstream in DXVK 2.x — v2.5.3 sizes the range to
+  the full render-state block — and current master has removed the DXSO module entirely, so there is nothing
+  to upstream; this hunk matters only while we pin 1.10.3. Checked 2026-07-09.)*
 - mingw-w64 14.0+ build fixes (`_D3DDEVINFO_RESOURCEMANAGER`, `ID3D10StateBlock` UUID redefinition, missing
   `<cstdint>`).
 
@@ -235,6 +240,7 @@ first after any L4D2 update). Originals are backed up as `*.original`.
 | `--install-bridge` | install bridge DLL, apply byte patches, start helper |
 | `--build-bridge` | compile `steam_api.dll` + `steam_helper` only |
 | `--bridge` | build + install + start helper, then stop |
+| `--max-settings` | re-apply the recommended max `video.txt` baseline **and** the dxsupport DX9.5 edits (the dxsupport pair also self-heals on every launch — A2) |
 | `--diag` | light, playable diagnostics → `game-stderr.log` (per-encoder GPU-fault log) |
 | `--wined3d` | render via Wine's native d3d9 → wined3d instead of DXVK (slower; `WINED3D_RENDERER=gl\|vulkan`). Serialises D3D9 (`mat_queue_mode 0`) for **that run only** — multicore (`-1`) is reverted on exit and no `autoexec.cfg` is persisted (C1) |
 | `--diag-gfx` | verbose DXVK + MoltenVK logging to `game-stderr.log` |
@@ -314,7 +320,9 @@ Full list with cause/workaround/status: [03 — Known issues](https://github.com
   multicore, vsync all persist across restarts (run `--max-settings` to deliberately reset to max). The three
   ConVar-only quality pins (`mat_picmip` / `r_waterforceexpensive` / `r_shadowrendertotexture`) that used to
   override texture/water/shadow quality were **removed** — they duplicated the detail levels and couldn't
-  persist anyway, so all Options → Video settings now persist. See
+  persist anyway, so all Options → Video settings now persist. The launcher-managed `dxsupport*.cfg` DX9.5
+  edits **self-heal on every launch** as of 2026-07-09 (A2 — durability issue #8 closed; no in-game menu
+  writes those files, so the re-apply can't clobber a player choice). See
   [05-usage.md](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/05-usage.md#game-graphics-settings).
 - **Multicore landmine — fixed (Phase 1 / C1+C2).** The `--wined3d` path used to persist `mat_queue_mode 0`
   (via `autoexec.cfg` + a `video.txt` rewrite) into the DXVK path. Now it scopes serialisation to that one
