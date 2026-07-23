@@ -802,11 +802,12 @@ game-DLL byte patches ([03-known-issues #11](03-known-issues.md#11-valve-game-up
 The immediate fix landed — **signature-anchored patching** (`_sigpatch`/`_do_patch`/`_snapshot_clean`):
 self-relocating, fail-safe (WARN + skip, never mis-apply), with clean-stock backup self-heal. Remaining
 follow-ups, in priority order:
-- **Re-derive P3 (engine level-load memmove guard)** — its signature was removed by the recompile, so it
-  is currently unapplied (warns loudly). **First confirm the crash still reproduces** on the Jun 2026 build
-  (`./play-l4d2.sh --diag`, load a campaign); the recompile may have fixed the underlying uninitialized-struct
-  bug, in which case retire the patch. Only if it recurs, locate the new faulting memmove thunk and add a
-  fresh signature. Same applies to re-confirming P1/P2/P4's crashes still exist at all.
+- ~~**Re-derive P3 (engine level-load memmove guard)**~~ — **RETIRED 2026-07-22 after repro-testing.**
+  The crash no longer reproduces on the Jun 2026 build: 2/2 automated `--diag` runs loaded `c1m1_hotel`
+  clean (in-game 42s/36s, 0 faults) where it was historically deterministic — Valve's recompile fixed the
+  underlying bug. The patch stanza was removed (no more launch warning); a re-derivation recipe stays in
+  `play-l4d2.sh` if a level-load memmove SEGV ever returns. P1/P2/P4 remain applied (their crash paths
+  weren't re-tested individually — they're kept as cheap belt-and-suspenders since they verify byte-exact).
 - **Build-drift telemetry / manifest** — commit a small manifest (size + sha256 + `Exe build:` string +
   appmanifest `buildid`) for the exact stock DLLs each patch was derived against, so drift is detectable
   offline and the launcher can name which build a patch set targets. (The launcher already logs the live

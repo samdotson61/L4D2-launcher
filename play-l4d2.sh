@@ -1350,18 +1350,17 @@ do_install_bridge() {
     "558bec8b4d0c83ec0c5356578b7d088b078b503c518bcf32dbffd28bf085f6" \
     "32c0c38b4d0c83ec0c5356578b7d088b078b503c518bcf32dbffd28bf085f6"
 
-  # P3  engine.dll — level-load memmove count-sanity guard (blocks a ~1 GB
-  #     rep-movsd SEGV when the engine calls memmove with a garbage count from
-  #     an uninitialized struct real Steam would have populated). The Jun-2026
-  #     build REPLACED the old thunk region — the 9-byte thunk signature no
-  #     longer exists — so this reports NOT FOUND and the guard is currently
-  #     UNAPPLIED. It must be re-derived by reproducing the level-load crash
-  #     (./play-l4d2.sh --diag, then locate the faulting memmove thunk/site) —
-  #     but FIRST confirm the crash still reproduces on this build; the recompile
-  #     may have fixed it. We pass the old signature so the drift warning fires.
-  _do_patch "engine.dll memmove level-load guard" "$en" \
-    "558bec5de977bb0800cccccccccccccc" \
-    "807c240f107705e974bb080033c0c3cc"
+  # P3  engine.dll — level-load memmove count-sanity guard: RETIRED 2026-07-22.
+  #     It blocked a ~1 GB rep-movsd SEGV when the old ("9477"-era) engine called
+  #     memmove with a garbage count from an uninitialized struct. The Jun-2026
+  #     rebuild REPLACED the thunk region (old sig 558bec5de977bb0800 has zero
+  #     matches) AND the crash no longer reproduces: 2/2 automated --diag runs
+  #     loaded c1m1_hotel clean (in-game 42s/36s, 0 faults, no SEGV) where the
+  #     old crash was deterministic at level load. The bridge's runtime page
+  #     pre-commits (steam_api_wine.c) still cover the garbage-pointer reads.
+  #     If a level-load SEGV in a memmove/rep-movsd tail ever returns, re-derive
+  #     from the --diag Wine backtrace and add a fresh _do_patch here
+  #     (patched form for reference: 807c240f107705e9<rel32>33c0c3cc).
 
   # P4  matchmaking.dll — force the registered-callback iterator to return false
   #     (xor al,al; ret 4) so it never calls vtable[0] on a callback object our

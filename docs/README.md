@@ -229,7 +229,7 @@ offsets, which the 2026-07-22 update silently broke — see
 | --- | --- | --- |
 | `client.dll` | HUD vtable[47] call | NOP a HUD-init call with a bad subject ptr |
 | `engine.dll` | CRT-pointer-deref fn | force it to return false |
-| `engine.dll` | level-load memmove | count sanity check (garbage-arg guard) — **needs re-derivation for the Jun 2026 build; warns loudly until then** |
+| `engine.dll` | level-load memmove | ~~count sanity check~~ **retired 2026-07-22** — the crash it guarded no longer reproduces on the Jun 2026 build (2/2 clean level-load runs); re-derivation recipe kept in `play-l4d2.sh` |
 | `matchmaking.dll` | callback iterator | → no-op (skip dispatch of un-delivered callbacks) |
 | `dxvk_d3d9.dll` | (binary) | fallback geometryShader/shaderCullDistance disable |
 
@@ -338,10 +338,11 @@ Full list with cause/workaround/status: [03 — Known issues](https://github.com
 - **`--wined3d` renders cleaner but crashes after a few minutes** (access violation in the Apple OpenGL →
   Metal layer) and is slower. DXVK is the primary path.
 - **The game-DLL byte patches are now signature-anchored** so a Valve update self-relocates them instead
-  of silently breaking (the 2026-07-22 update was absorbed this way; see
+  of silently breaking (the 2026-07-22 update was absorbed this way and the wrapper **live-verified working**
+  on the new build — boot → campaign → in-game, 0 GPU faults over 2×90 s automated runs; see
   [03 — Known issues #11](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)).
-  One patch (the level-load memmove guard) still needs re-derivation for the Jun 2026 build and warns
-  loudly until then; single-player boot/menu don't depend on it.
+  The old level-load memmove guard was retired — Valve's recompile fixed the crash it guarded (2/2 clean
+  level loads where it was previously deterministic).
 
 ---
 

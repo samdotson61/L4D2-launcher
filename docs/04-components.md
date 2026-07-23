@@ -49,7 +49,7 @@ The shim patches the game's own DLLs in memory (VirtualProtect + write), and a *
 | DLL | What | Why |
 |---|---|---|
 | `vgui2.dll` | Fill 11 encoded CRT function-pointer slots (real Wine `Fls*` for 4, no-op for the rest) | Wine doesn't run the init path that populates them → `call *eax` on NULL |
-| `engine.dll` | Fill 9 CRT slots; **hot-patch RunCallbacks call sites** (IAT→direct call); **BitBuffer LUT** init; a CRT-deref function forced to return false; **memmove sanity-check** (abort if count > ~268 MB) | Bypass IAT-zeroing DRM; avoid uninitialized-static crashes during level load |
+| `engine.dll` | Fill 9 CRT slots; **hot-patch RunCallbacks call sites** (IAT→direct call); **BitBuffer LUT** init; **garbage-page pre-commits** (VirtualAlloc at the 0xFE/0xF9 ranges the level-load memmove reads through — address-based, build-independent) | Bypass IAT-zeroing DRM; avoid uninitialized-static crashes during level load *(the on-disk memmove count-check and CRT-deref-false patches are separate — see the signature-anchored note below; the memmove one was retired 2026-07-22)* |
 | `client.dll` | Fill 9 CRT slots; NOP a HUD-init vtable[47] call | Uninitialized object → crash |
 | `matchmaking.dll` | Fill 8 CRT slots; NOP the callback-iterator (`xor eax,eax; ret 4`) | Iterates a callback vtable that's been freed/corrupted → execute-AV |
 

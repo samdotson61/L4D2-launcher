@@ -31,5 +31,7 @@ HDR=$(grep -i "HDR Enabled\|HDR Disabled" "$GD/console.log" 2>/dev/null | tail -
   grep -iE "0000010c|allocated at fault|DummyNull|out of bounds|no encoder" "$LD/game-stderr.log" 2>/dev/null | tail -5
   if [ "$NF" -gt 0 ]; then echo "VERDICT: FAULTS x$NF at ${FAULT_AT}s"; elif [ $INGAME_AT -gt 0 ]; then echo "VERDICT: *** NO FAULTS, reached in-game (${INGAME_AT}s), survived ${EL}s ***"; else echo "VERDICT: no fault but never confirmed in-game"; fi
 } | tee -a "$OUT"
-kill $LPID 2>/dev/null; pkill -f "L4D2.exe" 2>/dev/null; pkill -f "steam_helper" 2>/dev/null; sleep 2
+# (pkill pattern is the real process name — the old "L4D2.exe" was case-wrong and
+#  never matched left4dead2.exe; cleanup silently relied on the launcher's exit trap)
+kill $LPID 2>/dev/null; pkill -f "left4dead2.exe" 2>/dev/null; pkill -f "steam_helper" 2>/dev/null; sleep 2
 echo "killed" >> "$OUT"
