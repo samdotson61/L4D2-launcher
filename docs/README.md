@@ -218,16 +218,19 @@ Rebuilt by `build-deps.sh bridge`. No upstream; it's ours.
 - Encoder-execution-status capture for GPU-fault diagnosis (gated behind `MVK_L4D2_DEBUG=1`).
 
 ### Game DLLs — in-place byte patches (applied by `--install-bridge`)
-**Valid for Source engine build 9477 only.** Each guards on the exact original bytes and no-ops if they
-don't match, so a game update fails safe (but then the game may crash with no obvious cause — check these
-first after any L4D2 update). Originals are backed up as `*.original`.
+**Signature-anchored (build-drift-resilient).** Each patch **scans** the DLL for a long unique byte
+signature and writes only on an exact single match, so a Valve game update that shifts code offsets
+**self-relocates** instead of breaking, and a too-generic match **fails safe** (warns and skips, never
+mis-applies). `*.original` backups are refreshed only from confirmed-clean stock. (This replaced hardcoded
+offsets, which the 2026-07-22 update silently broke — see
+[03 — Known issues #11](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md).)
 
-| File | Offset | What |
+| File | Target | What |
 | --- | --- | --- |
-| `client.dll` | `+0x12CE0F` | NOP a HUD-iteration vtable[47] call with a bad subject ptr |
-| `engine.dll` | `+0x18F680` | force a CRT-pointer-deref fn to return false |
-| `engine.dll` | `+0x284150` | memmove count sanity check (garbage-arg guard) |
-| `matchmaking.dll` | `+0xC070` | callback iterator → no-op |
+| `client.dll` | HUD vtable[47] call | NOP a HUD-init call with a bad subject ptr |
+| `engine.dll` | CRT-pointer-deref fn | force it to return false |
+| `engine.dll` | level-load memmove | count sanity check (garbage-arg guard) — **needs re-derivation for the Jun 2026 build; warns loudly until then** |
+| `matchmaking.dll` | callback iterator | → no-op (skip dispatch of un-delivered callbacks) |
 | `dxvk_d3d9.dll` | (binary) | fallback geometryShader/shaderCullDistance disable |
 
 ---
@@ -334,8 +337,11 @@ Full list with cause/workaround/status: [03 — Known issues](https://github.com
   library, and the launcher passes the resolved path to the helper.
 - **`--wined3d` renders cleaner but crashes after a few minutes** (access violation in the Apple OpenGL →
   Metal layer) and is slower. DXVK is the primary path.
-- **The game-DLL byte patches are build-9477-specific** and will silently stop applying on any L4D2 update
-  (see the patch-inventory note).
+- **The game-DLL byte patches are now signature-anchored** so a Valve update self-relocates them instead
+  of silently breaking (the 2026-07-22 update was absorbed this way; see
+  [03 — Known issues #11](https://github.com/samdotson61/L4D2-launcher/blob/main/docs/03-known-issues.md)).
+  One patch (the level-load memmove guard) still needs re-derivation for the Jun 2026 build and warns
+  loudly until then; single-player boot/menu don't depend on it.
 
 ---
 

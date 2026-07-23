@@ -1234,6 +1234,73 @@ do_build_bridge() {
   ok "Bridge built: $b/steam_api.dll  +  $b/steam_helper"
 }
 
+# ── Signature-anchored DLL patching (build-drift-resilient) ───────────────────
+# The game-DLL patches below SCAN for a long, UNIQUE byte signature and write
+# only on an exact single match, so a Valve recompile that shifts code offsets
+# can't break them (self-relocating), and a too-generic match can't corrupt the
+# wrong function (fail-safe). This replaced hardcoded file offsets + 3-byte
+# guards, which a game update silently broke — 2 sites went dead and 2 risked
+# firing into an unrelated function (see docs/03-known-issues.md #11).
+# `find` and `repl` are EQUAL length; `repl` is `find` with the fix applied to
+# its head, so idempotency is a plain "is the patched form already present?"
+# check. Exit: 0 patched-or-already, 3 file-missing, 4 sig-not-found (build
+# drift), 5 ambiguous.
+_sigpatch() {  # $1=file $2=label(unused here) $3=find_hex $4=repl_hex
+  L4D2_F="$1" L4D2_FIND="$3" L4D2_REPL="$4" python3 - <<'PY'
+import os, sys
+f = os.environ['L4D2_F']
+find = bytes.fromhex(os.environ['L4D2_FIND'])
+repl = bytes.fromhex(os.environ['L4D2_REPL'])
+if len(find) != len(repl):
+    print("length-mismatch"); sys.exit(2)
+try:
+    d = open(f, 'rb').read()
+except FileNotFoundError:
+    print("missing"); sys.exit(3)
+nf = d.count(find)
+if nf == 0 and d.count(repl) >= 1:
+    print("already"); sys.exit(0)
+if nf == 1:
+    off = d.find(find)
+    b = bytearray(d); b[off:off + len(repl)] = repl
+    open(f, 'wb').write(b)
+    print("0x%x" % off); sys.exit(0)
+if nf == 0:
+    print("notfound"); sys.exit(4)
+print("ambiguous:%d" % nf); sys.exit(5)
+PY
+}
+
+# Route a _sigpatch result to ok/warn.
+_do_patch() {  # $1=label $2=file $3=find_hex $4=repl_hex
+  local out rc
+  # Capture rc without tripping `set -e`: a bare `out=$(cmd)` with a non-zero cmd
+  # (e.g. sig-not-found=4) is itself a failed command and would abort the script.
+  # The `&& rc=0 || rc=$?` list exempts it from set -e and preserves the real code.
+  out="$(_sigpatch "$2" "$1" "$3" "$4")" && rc=0 || rc=$?
+  case "$rc" in
+    0) [[ "$out" == already ]] && ok "$1 — already patched" || ok "$1 — patched at file $out" ;;
+    4) warn "$1 — SIGNATURE NOT FOUND (game-build drift): protection NOT applied. Re-derive for this build — see docs/03-known-issues.md #11." ;;
+    5) warn "$1 — signature AMBIGUOUS ($out): refusing to patch (fail-safe)." ;;
+    3) warn "$1 — target DLL missing." ;;
+    *) warn "$1 — patch error (rc=$rc: $out)." ;;
+  esac
+  return 0
+}
+
+# Snapshot a CLEAN-STOCK DLL to <file>.original, but ONLY when the live file is
+# confirmed unpatched (its pristine signature is present). A Valve update ships
+# whole clean DLLs, so this refreshes a stale backup left from a previous game
+# build, yet never overwrites a good backup with an already-patched/corrupt file.
+_snapshot_clean() {  # $1=file $2=pristine_sig_hex
+  L4D2_F="$1" L4D2_SIG="$2" python3 - <<'PY' || return 0
+import os, sys
+d = open(os.environ['L4D2_F'], 'rb').read()
+sys.exit(0 if bytes.fromhex(os.environ['L4D2_SIG']) in d else 1)
+PY
+  cp "$1" "$1.original"
+}
+
 # Apply binary patches to game DLLs so the bridge can carry the game past the
 # spots where our Steam stubs can't fully replicate real Mac Steam state.
 do_install_bridge() {
@@ -1249,109 +1316,61 @@ do_install_bridge() {
   cp "$b/steam_api.dll" "$bin/steam_api.dll"
   ok "Installed bridge steam_api.dll (original backed up)"
 
-  # matchmaking.dll: no longer patched. With SDK-1.53a headers in
-  # bridge/sdk/ (the rev L4D2 was actually built against) the matchmaking
-  # static instances initialise correctly and the +0x70C2 NULL-vptr crash
-  # no longer triggers. Leave .original intact in case we need to revert.
-  [[ -f "$mm.original" ]] || cp "$mm" "$mm.original"
-
-  # client.dll +0x12CE0F: NOP out a HUD-iteration vtable[47] call whose
-  # subject pointer (edi) ends up 2 instead of a real object. Bypassing
-  # this lets the per-HUD init loop continue past one specific element.
-  [[ -f "$cl.original" ]] || cp "$cl" "$cl.original"
-  python3 - <<EOF
-with open(r'''$cl''', 'r+b') as f:
-    f.seek(0x12ce0f)
-    cur = f.read(12)
-    if cur != b'\x8b\x17\x8b\x82\xbc\x00\x00\x00\x8b\xcf\xff\xd0':
-        pass
-    else:
-        f.seek(0x12ce0f); f.write(b'\x90' * 12)
-EOF
-  ok "Patched client.dll +0x12CE0F"
-
-  # engine.dll +0x18F680: force this CRT-pointer-derefing function to
-  # return false (xor al,al; ret). Its only callers handle a false return
-  # gracefully; left alone it crashes the moment some thread reads an
-  # un-decoded encoded pointer slot.
+  # ── Game-DLL byte patches (signature-anchored — see _sigpatch above) ────────
+  # These carry the game past spots our Steam stubs can't fully replicate. They
+  # were first derived against the "engine build 9477" binaries; the scan
+  # approach RE-LOCATES each target automatically after a Valve game update
+  # (a recompile shifts offsets but the target function's local byte shape is
+  # stable). If a signature is missing (function changed shape, not just moved)
+  # or ambiguous, the patch WARNS and is skipped — never mis-applied. Check
+  # these first if the game misbehaves right after a game update. The
+  # SteamServersConnected callback plumbing is separate (helper side).
   local en="$bin/engine.dll"
-  [[ -f "$en.original" ]] || cp "$en" "$en.original"
-  python3 - <<EOF
-with open(r'''$en''', 'r+b') as f:
-    f.seek(0x18ea80)
-    cur = f.read(3)
-    if cur == b'\x55\x8b\xec':
-        f.seek(0x18ea80); f.write(b'\x32\xc0\xc3')
-EOF
-  ok "Patched engine.dll +0x18F680"
+  # NB: `|| true` — `strings` (~5 MB) into `grep -m1` (early-exits at first match)
+  # SIGPIPEs the producer; under `set -o pipefail` that is exit 141, which `set -e`
+  # would treat as fatal. Same SIGPIPE-under-pipefail class as the MoltenVK check.
+  local ebuild; ebuild="$(strings -a "$en" 2>/dev/null | grep -m1 'Exe build:' || true)"
+  say "Patching game DLLs — engine ${ebuild:-<build string not found>}"
 
-  # engine.dll +0x284150: memmove thunk. The engine's level-load path calls
-  # memmove with ABSURD argument values (count ~1 GB, source ptr in the 0xFE
-  # range — both garbage from an uninitialized data structure that real Steam
-  # would have populated). The memmove tries to `rep movsd` ~1 GB through
-  # unmapped memory → SEGV in the reverse-copy tail.
-  # We add a sanity check at the thunk: if count's high byte > 0x10
-  # (count > ~268 MB), return 0 without copying. memmove's return value is
-  # "dst" per spec but most callers don't check it; the caller's data is
-  # left uninitialized but the engine continues.
-  # Patch (16 bytes, fits exactly into the thunk's slot before the next thunk
-  # at +0x284160). rel32 in the jmp is RVA-relative (target_RVA - next_RIP_RVA
-  # = 0x30FCD0 - 0x28415C = 0x8BB74), which is preserved across Wine's PE
-  # relocation since it's PC-relative.
-  #   80 7c 24 0f 10   cmp byte [esp+0xf], 0x10  ; high byte of count arg
-  #   77 05            ja  +5  (to early_ret)
-  #   e9 74 bb 08 00   jmp engine+0x30FCD0       ; real memmove
-  #   33 c0            xor eax, eax              ; early_ret: return 0
-  #   c3               ret
-  #   cc               int3 (pad)
-  python3 - <<EOF
-with open(r'''$en''', 'r+b') as f:
-    f.seek(0x283550)
-    cur = f.read(16)
-    # Accept either original thunk or our bad first patch attempt (0x10 in jmp byte 4)
-    is_orig = cur == b'\x55\x8b\xec\x5d\xe9\x77\xbb\x08\x00\xcc\xcc\xcc\xcc\xcc\xcc\xcc'
-    is_bad  = cur == b'\x80\x7c\x24\x0f\x10\x77\x05\xe9\x74\xbb\x08\x10\x33\xc0\xc3\xcc'
-    if is_orig or is_bad:
-        f.seek(0x283550)
-        f.write(b'\x80\x7c\x24\x0f\x10\x77\x05\xe9\x74\xbb\x08\x00\x33\xc0\xc3\xcc')
-EOF
-  ok "Patched engine.dll +0x284150 (memmove count sanity check)"
+  # P1  client.dll — NOP a HUD-init loop's vtable[47] call whose subject ptr
+  #     (edi) is 2 instead of an object. Sig: mov edx,[edi]; mov eax,[edx+0xbc]
+  #     (=vtable[47]); mov ecx,edi; call eax  + trailing cmp byte[ebp-1],0; je
+  #     for uniqueness. (Relocated +0x20 by the Jun-2026 build; the scan finds
+  #     it wherever it moved.)
+  _snapshot_clean "$cl" "8b178b82bc0000008bcfffd0"
+  _do_patch "client.dll HUD vtable[47] NOP" "$cl" \
+    "8b178b82bc0000008bcfffd0807dff00741c" \
+    "909090909090909090909090807dff00741c"
 
-  # NOTE: tried patching engine.dll +0x1CC780 (the only caller of the
-  # memmove that crashes during level load with garbage src=0xFEE95A3F) to
-  # `xor eax, eax; ret`. That caused the engine to show a 329×114 error
-  # dialog instead of reaching the menu — the function's return value IS
-  # actually used by downstream code. Not patching it; instead leaving the
-  # memmove crash as the next problem to solve in a more surgical way.
-  python3 - <<EOF
-with open(r'''$en''', 'r+b') as f:
-    f.seek(0x1cbb80)
-    cur = f.read(3)
-    if cur == b'\x33\xc0\xc3':
-        # restore original push ebp; mov ebp, esp
-        f.seek(0x1cbb80); f.write(b'\x55\x8b\xec')
-EOF
+  # P2  engine.dll — force a CRT-encoded-pointer-deref fn to return false
+  #     (xor al,al; ret). Sig spans the prologue + arg setup, stopping BEFORE
+  #     the build-specific absolute global ref so it stays stable across builds.
+  _snapshot_clean "$en" "558bec8b4d0c83ec0c5356578b7d088b078b503c"
+  _do_patch "engine.dll CRT-ptr-deref false-return" "$en" \
+    "558bec8b4d0c83ec0c5356578b7d088b078b503c518bcf32dbffd28bf085f6" \
+    "32c0c38b4d0c83ec0c5356578b7d088b078b503c518bcf32dbffd28bf085f6"
 
-  # matchmaking.dll +0xC070: iteration loop that walks registered Steam
-  # callbacks and calls each one's vtable[0] (the Run() method). For
-  # callback objects whose memory has been freed/corrupted (which happens
-  # in our bridge-Steam-stubs world since we don't deliver real Steam
-  # callbacks), vtable[0] ends up pointing to a heap address and the call
-  # crashes with EXECUTE access violation. Forcing this iterator to return
-  # false skips the dispatch entirely — the game's matchmaking still
-  # initializes and main menu still renders, we just don't fire
-  # SteamCallback handlers from this loop.
-  local mm="$GAME_DIR/left4dead2/bin/matchmaking.dll"
-  [[ -f "$mm.original" ]] || cp "$mm" "$mm.original"
-  python3 - <<EOF
-with open(r'''$mm''', 'r+b') as f:
-    f.seek(0xB470)
-    cur = f.read(5)
-    if cur == b'\x55\x8b\xec\x83\x79':
-        f.seek(0xB470); f.write(b'\x32\xc0\xc2\x04\x00')
-    # else already patched or unknown
-EOF
-  ok "Patched matchmaking.dll +0xC070 (callback iterator → no-op)"
+  # P3  engine.dll — level-load memmove count-sanity guard (blocks a ~1 GB
+  #     rep-movsd SEGV when the engine calls memmove with a garbage count from
+  #     an uninitialized struct real Steam would have populated). The Jun-2026
+  #     build REPLACED the old thunk region — the 9-byte thunk signature no
+  #     longer exists — so this reports NOT FOUND and the guard is currently
+  #     UNAPPLIED. It must be re-derived by reproducing the level-load crash
+  #     (./play-l4d2.sh --diag, then locate the faulting memmove thunk/site) —
+  #     but FIRST confirm the crash still reproduces on this build; the recompile
+  #     may have fixed it. We pass the old signature so the drift warning fires.
+  _do_patch "engine.dll memmove level-load guard" "$en" \
+    "558bec5de977bb0800cccccccccccccc" \
+    "807c240f107705e974bb080033c0c3cc"
+
+  # P4  matchmaking.dll — force the registered-callback iterator to return false
+  #     (xor al,al; ret 4) so it never calls vtable[0] on a callback object our
+  #     bridge left un-delivered (heap ptr → EXECUTE fault). Sig runs into the
+  #     body to disambiguate from a near-identical prologue twin a few bytes back.
+  _snapshot_clean "$mm" "558bec837914008b45088b500c8b4004568b30741e"
+  _do_patch "matchmaking.dll callback-iterator no-op" "$mm" \
+    "558bec837914008b45088b500c8b4004568b30741e8b4914578b39" \
+    "32c0c2040014008b45088b500c8b4004568b30741e8b4914578b39"
 
   # dxvk_d3d9.dll: install our source-patched DXVK 1.10.3 build
   # (./dxvk-build/dxvk_d3d9.dll) CLEAN.  All Apple-Silicon fixes live in the

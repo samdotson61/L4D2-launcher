@@ -795,6 +795,29 @@ Checked 2026-07-09:
 
 ---
 
+# Update resilience (game-DLL patch hardening — added 2026-07-22)
+
+The 2026-07-22 Valve update (`PatchVersion 2.2.4.3`, engine `Jun 30 2026`) broke the hardcoded-offset
+game-DLL byte patches ([03-known-issues #11](03-known-issues.md#11-valve-game-update-broke-the-build-specific-byte-patches--handled-2026-07-22)).
+The immediate fix landed — **signature-anchored patching** (`_sigpatch`/`_do_patch`/`_snapshot_clean`):
+self-relocating, fail-safe (WARN + skip, never mis-apply), with clean-stock backup self-heal. Remaining
+follow-ups, in priority order:
+- **Re-derive P3 (engine level-load memmove guard)** — its signature was removed by the recompile, so it
+  is currently unapplied (warns loudly). **First confirm the crash still reproduces** on the Jun 2026 build
+  (`./play-l4d2.sh --diag`, load a campaign); the recompile may have fixed the underlying uninitialized-struct
+  bug, in which case retire the patch. Only if it recurs, locate the new faulting memmove thunk and add a
+  fresh signature. Same applies to re-confirming P1/P2/P4's crashes still exist at all.
+- **Build-drift telemetry / manifest** — commit a small manifest (size + sha256 + `Exe build:` string +
+  appmanifest `buildid`) for the exact stock DLLs each patch was derived against, so drift is detectable
+  offline and the launcher can name which build a patch set targets. (The launcher already logs the live
+  `Exe build:` string on every patch pass.)
+- **`--refresh-backups` + build-aware restore** — a subcommand that re-snapshots `*.original` only when the
+  build-string check confirms on-disk binaries are clean stock, and gate any `--reset`/restore on a build-id
+  match (on mismatch, direct the user to Steam "verify integrity" rather than restoring a stale backup).
+  `_snapshot_clean` already covers the common case (refresh-from-clean on the next install after an update).
+
+---
+
 ## Risks / unknowns (call these out loud)
 - ~~**HDR via DXVK 2.5.3 is the leading hypothesis but untested.**~~ **RESOLVED 2026-06-03 (for rendering)** —
   DXVK was never the HDR lever; HDR was pinned off by the launcher's own `+mat_hdr_level 1` arg, now removed.

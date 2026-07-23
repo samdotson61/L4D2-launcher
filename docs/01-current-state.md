@@ -1,6 +1,8 @@
 # Current State & Playability
 
-**As of 2026-06-05.** This describes exactly what works, what doesn't, and the precise configuration currently deployed.
+**As of 2026-06-05** (update note 2026-07-22 below). This describes exactly what works, what doesn't, and the precise configuration currently deployed.
+
+> **2026-07-22 — survived a Valve game update.** L4D2 updated to `PatchVersion 2.2.4.3` (engine `Exe build: Jun 30 2026`), regenerating the game DLLs. The Steam bridge, DXVK/MoltenVK, and all configs were unaffected; only the build-specific game-DLL byte patches were broken. The launcher's on-disk patches were converted to **signature-anchored scanning** (self-relocating + fail-safe) and re-applied to the updated binaries (P1 client, P2 engine CRT-deref, P4 matchmaking — all verified byte-exact; backups refreshed to clean stock). **One patch remains unapplied**: the level-load memmove guard (P3) — its signature was removed by the recompile, so it now warns loudly and needs re-derivation *if the underlying crash still reproduces* on this build. Single-player boot/menu are unaffected. Full detail: [03-known-issues.md #11](03-known-issues.md#11-valve-game-update-broke-the-build-specific-byte-patches--handled-2026-07-22).
 
 ---
 

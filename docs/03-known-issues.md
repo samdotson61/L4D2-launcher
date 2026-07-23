@@ -166,6 +166,25 @@ test (D5). ([D3](08-roadmap.md#d3-plug-in-real-steam-values))
 
 ---
 
+## 11. Valve game update broke the build-specific byte patches — HANDLED 2026-07-22
+
+**Symptom.** Valve pushed an L4D2 update (appmanifest `buildid 23990068`, `PatchVersion 2.2.4.3`, engine `Exe build: Jun 30 2026`), regenerating the core game DLLs. The four `do_install_bridge` on-disk byte patches were derived against the previous "engine build 9477" binaries using **hardcoded file offsets + short guard bytes**, so the update silently broke them:
+- **client.dll `+0x12CE0F`** and **engine.dll `+0x284150`** (memmove sanity): the target code shifted, guards no longer matched → the patches **silently no-op'd**, leaving those crash mitigations **absent**.
+- **engine.dll `+0x18F680`** and **matchmaking.dll `+0xC070`**: their guards (`55 8b ec` / `55 8b ec 83 79`) are **generic function prologues** — they *coincidentally still matched* at the stale offset, risking a **mis-patch into an unrelated function**. (Forensic window-diff later showed those two functions had NOT actually moved, so they were still correct — but the guards were too weak to *prove* that, which was the real danger.)
+
+**Impact assessment (verified, not assumed).** A multi-agent forensic pass over the updated binaries confirmed the rest of the stack survives the update untouched: the **Steam bridge** still works (every Steamworks interface-version string the new binaries request is unchanged and dispatched by name-prefix); **DXVK** (`bin/dxvk_d3d9.dll` sha1-identical to our build) and **MoltenVK** (in the Whisky bundle, outside the game dir) are unaffected; and `dxsupport.cfg`/`video.txt`/`steam_appid.txt` were not reverted. Only the game-DLL byte patches were affected.
+
+**Fix (2026-07-22) — signature-anchored patching.** `play-l4d2.sh` gained `_sigpatch`/`_do_patch`/`_snapshot_clean` (defined above `do_install_bridge`). Each patch now **scans** the DLL for a long **unique** signature and writes only on an exact single match:
+- **Self-relocating:** P1 (client HUD-vtable NOP) auto-found its target at the new `0x12CE2F` (it had moved a fixed +0x20); P2 (engine CRT-deref-false) and P4 (matchmaking callback-iterator) re-applied at their unmoved sites — all verified byte-exact against the live game.
+- **Fail-safe:** a signature that matches 0 or >1 places **WARNs and skips** rather than mis-firing — the mis-patch class is eliminated.
+- **Backup self-heal:** `_snapshot_clean` refreshes each `*.original` only from confirmed-clean stock (pristine signature present), so the stale-backup hazard is fixed automatically after any update. (Before this, `engine.dll.original` was an 18-month-old Jan 2025 build; it is now clean Jun 2026 stock.)
+
+**Remaining gap — P3 (engine memmove level-load guard).** The Jun 2026 build **replaced** the old thunk region — the 9-byte thunk signature has **zero** matches — so P3 cannot be auto-relocated and now emits a loud `SIGNATURE NOT FOUND` warning instead of silently no-op'ing. The level-load memmove crash-guard is therefore **currently unapplied**. To re-derive: **first confirm the crash still reproduces** on this build (`./play-l4d2.sh --diag`, load a campaign) — Valve's recompile may have fixed the underlying uninitialized-struct bug — and only if it recurs, locate the new faulting memmove thunk/site and update P3's signature. Single-player boot and menu do not depend on P3.
+
+**Recovery notes.** For a clean stock DLL, use Steam → L4D2 → Properties → Installed Files → **Verify integrity** (never restore blindly from a `*.original` — though those are now correct post-fix). The launcher logs the live engine `Exe build:` string on every patch pass so build drift is visible. Hardening follow-ups (build-id manifest, `--refresh-backups`, build-aware restore gating) are tracked in [08-roadmap.md](08-roadmap.md).
+
+---
+
 ## Resolved (for reference)
 
 These were real blockers, now fixed — useful history if a regression appears:

@@ -54,6 +54,8 @@ The shim patches the game's own DLLs in memory (VirtualProtect + write), and a *
 | `matchmaking.dll` | Fill 8 CRT slots; NOP the callback-iterator (`xor eax,eax; ret 4`) | Iterates a callback vtable that's been freed/corrupted → execute-AV |
 
 > Exact offsets drift between game builds — see `steam_api_wine.c` for the authoritative list and signatures. `play-l4d2.sh --install-bridge` re-applies the on-disk DLL patches; the in-memory CRT/IAT patches happen at runtime.
+>
+> **On-disk patches are now signature-anchored (2026-07-22).** The four `do_install_bridge` byte patches (`client.dll` HUD-vtable NOP, `engine.dll` CRT-deref-false + memmove-sanity, `matchmaking.dll` callback-iterator no-op) no longer use hardcoded file offsets. `_sigpatch` **scans** each DLL for a long unique byte signature and writes only on an exact single match, so a Valve recompile that shifts offsets self-relocates instead of breaking, and a too-generic match fails safe (WARN + skip, never mis-apply). `_snapshot_clean` refreshes each `*.original` backup only from confirmed-clean stock (pristine signature present), fixing the stale-backup-after-update hazard. See [03-known-issues #11](03-known-issues.md#11-valve-game-update-broke-the-build-specific-byte-patches--handled-2026-07-22).
 
 ### Codegen
 - `gen_vtables.py` parses `bridge/sdk/` (Steamworks **1.53a**, + ISteamTimeline from 1.60) and emits `vtables_generated.c` (110 KB) with correct per-method arg-byte counts. Never hand-edit the generated file. `sdk_old/` is archived reference only.
